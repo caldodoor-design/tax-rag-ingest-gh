@@ -28,7 +28,12 @@ egov:
   max_laws: 200
 
 nta:
-  enabled: false
+  enabled: true
+  seeds:
+    - https://www.nta.go.jp/law/tsutatsu/kihon/
+  allowed_prefixes:
+    - https://www.nta.go.jp/law/tsutatsu/kihon/
+  max_pages: 100
 
 chunking:
   max_chars: 1200
