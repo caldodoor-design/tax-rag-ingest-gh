@@ -1,82 +1,130 @@
+import time
+from typing import Dict, List, Optional, Set
+
 import requests
-from lxml import etree
-from typing import Dict, List, Tuple
 
-# e-Gov 法令API Version1 (XML)
-# Docs: https://laws.e-gov.go.jp/docs/ ... (law-data documentation alpha)
-BASE_V1 = "https://elaws.e-gov.go.jp/api/1"
+BASE_V2 = "https://laws.e-gov.go.jp/api/2"
 
-def _get_xml(url: str, timeout: int = 30) -> etree._Element:
-    r = requests.get(url, timeout=timeout, headers={"User-Agent": "tax-rag-mvp/0.1"})
-    r.raise_for_status()
-    parser = etree.XMLParser(recover=True)
-    return etree.fromstring(r.content, parser=parser)
-
-def fetch_law_list(category: int = 1) -> List[Dict[str, str]]:
+def _extract_text(node) -> str:
     """
-    category: 1 is commonly used in examples (all current laws).
-    Returns list of {law_id, law_name, law_no}
+    e-Gov v2 の law_full_text (JSONツリー) から文字だけを再帰的に抽出する
     """
-    root = _get_xml(f"{BASE_V1}/lawlists/{category}")
-    out = []
+    if node is None:
+        return ""
+    if isinstance(node, str):
+        return node
+    if isinstance(node, list):
+        parts = []
+        for x in node:
+            t = _extract_text(x)
+            if t:
+                parts.append(t)
+        return "\n".join(parts)
+    if isinstance(node, dict):
+        return _extract_text(node.get("children"))
+    return str(node)
 
-    # Attempt to find LawList elements regardless of exact nesting
-    for law in root.xpath(".//*[local-name()='LawList']"):
-        law_id = law.findtext(".//*[local-name()='LawID']") or law.findtext(".//*[local-name()='LawId']")
-        law_name = law.findtext(".//*[local-name()='LawName']")
-        law_no = law.findtext(".//*[local-name()='LawNo']") or law.findtext(".//*[local-name()='LawNum']")
-        if law_id and law_name:
-            out.append({"law_id": law_id.strip(), "law_name": law_name.strip(), "law_no": (law_no or "").strip()})
+def _get_json(session: requests.Session, url: str, params: Dict, timeout: int = 60) -> Optional[Dict]:
+    try:
+        r = session.get(url, params=params, timeout=timeout)
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        print(f"[eGov] request failed: {url} params={params} err={e}")
+        return None
 
-    # Some responses may use LawInfo nodes
-    if not out:
-        for law in root.xpath(".//*[local-name()='LawInfo']"):
-            law_id = law.findtext(".//*[local-name()='LawID']") or law.findtext(".//*[local-name()='LawId']")
-            law_name = law.findtext(".//*[local-name()='LawName']")
-            law_no = law.findtext(".//*[local-name()='LawNo']") or law.findtext(".//*[local-name()='LawNum']")
-            if law_id and law_name:
-                out.append({"law_id": law_id.strip(), "law_name": law_name.strip(), "law_no": (law_no or "").strip()})
-    return out
-
-def fetch_law_text(law_id: str) -> Tuple[str, str]:
+def search_laws_by_title(session: requests.Session, law_title: str, limit: int = 5) -> List[Dict]:
     """
-    Returns (title, plain_text) for a given law_id.
+    法令一覧取得（v2）
+    GET /laws?law_title=...&limit=...&response_format=json
     """
-    root = _get_xml(f"{BASE_V1}/lawdata/{law_id}")
-    title = root.findtext(".//*[local-name()='LawName']") or ""
+    data = _get_json(
+        session,
+        f"{BASE_V2}/laws",
+        params={
+            "law_title": law_title,
+            "limit": limit,
+            "response_format": "json",
+        },
+    )
+    if not data:
+        return []
+    return data.get("laws", []) or []
 
-    # Extract text from the main law body if present
-    body_nodes = (
-        root.xpath(".//*[local-name()='LawFullText']")
-        or root.xpath(".//*[local-name()='LawBody']")
-        or [root]
+def fetch_law_full_text(session: requests.Session, law_id: str) -> Optional[Dict]:
+    """
+    法令本文取得（v2）
+    GET /law_data/{law_id}?response_format=json&law_full_text_format=json
+    """
+    return _get_json(
+        session,
+        f"{BASE_V2}/law_data/{law_id}",
+        params={
+            "response_format": "json",
+            "law_full_text_format": "json",
+        },
     )
 
-    texts = []
-    for n in body_nodes:
-        texts.append(" ".join(t.strip() for t in n.itertext() if t and t.strip()))
-    full_text = "\n".join([t for t in texts if t]).strip()
-    return title.strip(), full_text
+def collect_laws_by_keywords(
+    keywords: List[str],
+    max_laws: int = 30,
+    per_keyword_limit: int = 5,
+    delay_seconds: float = 0.3,
+) -> List[Dict[str, str]]:
+    """
+    keywords(法令名) → /laws で law_id を引いて → /law_data/{law_id} で本文を取得して docs にして返す
+    """
+    session = requests.Session()
+    session.headers.update({"User-Agent": "tax-rag-mvp/0.1 (+https://example.invalid)"})
 
-def collect_laws_by_keywords(keywords: List[str], max_laws: int = 30, category: int = 1) -> List[Dict[str, str]]:
-    laws = fetch_law_list(category=category)
-    hits = []
-    for law in laws:
-        name = law["law_name"]
-        if any(k in name for k in keywords):
-            hits.append(law)
-        if len(hits) >= max_laws:
-            break
+    docs: List[Dict[str, str]] = []
+    seen_law_ids: Set[str] = set()
 
-    out_docs = []
-    for law in hits:
-        title, text = fetch_law_text(law["law_id"])
-        url = f"https://laws.e-gov.go.jp/law/{law['law_id']}"
-        out_docs.append({
-            "source": "egov",
-            "title": title or law["law_name"],
-            "url": url,
-            "content": text,
-            "extra": {"law_id": law["law_id"], "law_no": law.get("law_no", "")},
-        })
-    return out_docs
+    for kw in keywords:
+        print(f"[eGov] searching: {kw}")
+        laws = search_laws_by_title(session, law_title=kw, limit=per_keyword_limit)
+
+        for item in laws:
+            law_info = item.get("law_info", {}) or {}
+            revision_info = item.get("revision_info", {}) or {}
+
+            law_id = law_info.get("law_id")
+            if not law_id or law_id in seen_law_ids:
+                continue
+            seen_law_ids.add(law_id)
+
+            title = revision_info.get("law_title") or kw
+            law_num = law_info.get("law_num") or ""
+            promulgation_date = law_info.get("promulgation_date") or ""
+
+            data = fetch_law_full_text(session, law_id=law_id)
+            if not data:
+                continue
+
+            full_text_node = data.get("law_full_text")
+            text = _extract_text(full_text_node).strip()
+            if not text:
+                continue
+
+            # 表示用URL（閲覧サイト）
+            url = f"https://laws.e-gov.go.jp/law/{law_id}"
+
+            docs.append({
+                "source": "egov",
+                "title": f"{title}（{law_num}）" if law_num else title,
+                "url": url,
+                "content": text,
+                "extra": {
+                    "law_id": law_id,
+                    "law_num": law_num,
+                    "promulgation_date": promulgation_date,
+                },
+            })
+
+            print(f"[eGov] fetched: {title} chars={len(text)}")
+            time.sleep(delay_seconds)
+
+            if len(docs) >= max_laws:
+                return docs
+
+    return docs
