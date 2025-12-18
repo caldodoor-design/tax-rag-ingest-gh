@@ -74,6 +74,21 @@ def main():
 
             )
         )
+   # 4) NTA shitsugi（質疑応答事例）
+   if cfg.get("nta_shitsugi", {}).get("enabled", False):
+        nt = cfg["nta_shitsugi"]
+        docs.extend(
+            crawl_nta(
+                seeds=nt.get("seeds", []),
+                max_pages=int(nt.get("max_pages", 2000)),
+                delay_seconds=float(nt.get("delay_seconds", 0.6)),
+                allowed_prefixes=nt.get("allowed_prefixes"),
+                exclude_url_regex=nt.get("exclude_url_regex"),
+                extra_defaults={"nta_kind": "shitsugi"},
+                skip_save_title_regex=nt.get("skip_save_title_regex"),
+                skip_save_url_regex=nt.get("skip_save_url_regex"),
+            )
+        )
 
     
     # normalize and id/hash
