@@ -29,18 +29,34 @@ egov:
 
 nta:
   enabled: true
-  max_pages: 100
+  max_pages: 3000
   delay_seconds: 0.6
   seeds:
+    # 基本通達：法人税
     - https://www.nta.go.jp/law/tsutatsu/kihon/hojin/01.htm
+    # 基本通達：所得税
     - https://www.nta.go.jp/law/tsutatsu/kihon/shotoku/01.htm
+    # 基本通達：消費税
     - https://www.nta.go.jp/law/tsutatsu/kihon/shohi/01.htm
+    # 基本通達：印紙税
+    - https://www.nta.go.jp/law/tsutatsu/kihon/inshi/mokuji.htm
+    # 基本通達：国税通則法（徴収部）
+    - https://www.nta.go.jp/law/tsutatsu/kihon/tsusoku/00.htm
+    # 基本通達：国税徴収法
     - https://www.nta.go.jp/law/tsutatsu/kihon/chosyu/index.htm
+    # 基本通達：相続税法（※この中に贈与税の基本通達も入ってる）
+    - https://www.nta.go.jp/law/tsutatsu/kihon/sisan/sozoku2/01.htm
+    # 基本通達：財産評価
+    - https://www.nta.go.jp/law/tsutatsu/kihon/sisan/hyoka_new/01.htm
+
   allowed_prefixes:
     - https://www.nta.go.jp/law/tsutatsu/kihon/
+
   exclude_url_regex:
+    - "/kaisei/"
     - "/pdf/"
     - "\\.pdf$"
+
 
 
 chunking:
