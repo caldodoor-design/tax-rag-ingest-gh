@@ -29,11 +29,19 @@ egov:
 
 nta:
   enabled: true
+  max_pages: 100
+  delay_seconds: 0.6
   seeds:
-    - https://www.nta.go.jp/law/tsutatsu/kihon/
+    - https://www.nta.go.jp/law/tsutatsu/kihon/hojin/01.htm
+    - https://www.nta.go.jp/law/tsutatsu/kihon/shotoku/01.htm
+    - https://www.nta.go.jp/law/tsutatsu/kihon/shohi/01.htm
+    - https://www.nta.go.jp/law/tsutatsu/kihon/chosyu/index.htm
   allowed_prefixes:
     - https://www.nta.go.jp/law/tsutatsu/kihon/
-  max_pages: 100
+  exclude_url_regex:
+    - "/pdf/"
+    - "\\.pdf$"
+
 
 chunking:
   max_chars: 1200
