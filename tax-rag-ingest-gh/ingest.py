@@ -26,10 +26,17 @@ def main():
 
     # 2) NTA crawl
     if cfg.get("nta", {}).get("enabled", False):
-        seeds = cfg["nta"].get("seeds", [])
-        max_pages = int(cfg["nta"].get("max_pages", 400))
-        delay = float(cfg["nta"].get("delay_seconds", 0.5))
-        docs.extend(crawl_nta(seeds=seeds, max_pages=max_pages, delay_seconds=delay))
+        nt = cfg["nta"]
+　      docs.extend(
+            crawl_nta(
+                seeds=nt.get("seeds", []),
+                max_pages=int(nt.get("max_pages", 100)),
+                delay_seconds=float(nt.get("delay_seconds", 0.6)),
+                allowed_prefixes=nt.get("allowed_prefixes"),
+                exclude_url_regex=nt.get("exclude_url_regex"),
+            )
+        )
+
 
     # normalize and id/hash
     normalized_docs: List[Dict] = []
