@@ -24,18 +24,19 @@ def main():
         max_laws = int(cfg["egov"].get("max_laws", 30))
         docs.extend(collect_laws_by_keywords(keywords=keywords, max_laws=max_laws, category=1))
 
-    # 2) NTA crawl
-    if cfg.get("nta", {}).get("enabled", False):
-        nt = cfg["nta"]
-　      docs.extend(
-            crawl_nta(
-                seeds=nt.get("seeds", []),
-                max_pages=int(nt.get("max_pages", 100)),
-                delay_seconds=float(nt.get("delay_seconds", 0.6)),
-                allowed_prefixes=nt.get("allowed_prefixes"),
-                exclude_url_regex=nt.get("exclude_url_regex"),
-            )
+# 2) NTA crawl
+if cfg.get("nta", {}).get("enabled", False):
+    nt = cfg["nta"]
+    docs.extend(
+        crawl_nta(
+            seeds=nt.get("seeds", []),
+            max_pages=int(nt.get("max_pages", 100)),
+            delay_seconds=float(nt.get("delay_seconds", 0.6)),
+            allowed_prefixes=nt.get("allowed_prefixes"),
+            exclude_url_regex=nt.get("exclude_url_regex"),
         )
+    )
+
 
 
     # normalize and id/hash
