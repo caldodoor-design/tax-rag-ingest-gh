@@ -54,6 +54,21 @@ def main():
             )
         )
 
+    # 3) NTA sochiho（措置法通達）
+    if cfg.get("nta_sochiho", {}).get("enabled", False):
+        nt = cfg["nta_sochiho"]
+        docs.extend(
+            crawl_nta(
+                seeds=nt.get("seeds", []),
+                max_pages=int(nt.get("max_pages", 2500)),
+                delay_seconds=float(nt.get("delay_seconds", 0.6)),
+                allowed_prefixes=nt.get("allowed_prefixes"),
+                exclude_url_regex=nt.get("exclude_url_regex"),
+                extra_defaults={"nta_kind": "sochiho"},
+            )
+        )
+
+    
     # normalize and id/hash
     normalized_docs: List[Dict] = []
     for d in docs:
