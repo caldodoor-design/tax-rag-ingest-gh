@@ -1,0 +1,1 @@
+set "SUPABASE_DB_URL=postgresql://postgres:e1021211@db.hvnhziuhfajlqokhrygo.supabase.co:5432/postgres?sslmode=require"

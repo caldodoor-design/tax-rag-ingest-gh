@@ -1,0 +1,16 @@
+egov:
+  enabled: true
+  keywords:
+    - 所得税法
+  max_laws: 1
+
+nta:
+  enabled: false
+
+chunking:
+  max_chars: 1200
+  overlap_chars: 200
+
+embedding:
+  model: sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
+  normalize: true
