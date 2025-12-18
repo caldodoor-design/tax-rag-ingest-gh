@@ -1,0 +1,478 @@
+import requests
+from lxml import etree
+from typing import Dict, List, Tuple
+
+# e-Gov 法令API Version1 (XML)
+# Docs: https://laws.e-gov.go.jp/docs/ ... (law-data documentation alpha)
+BASE_V1 = "https://elaws.e-gov.go.jp/api/1"
+
+def _get_xml(url: str, timeout: int = 30) -> etree._Element:
+    r = requests.get(url, timeout=timeout, headers={"User-Agent": "tax-rag-mvp/0.1"})
+    r.raise_for_status()
+    parser = etree.XMLParser(recover=True)
+    return etree.fromstring(r.content, parser=parser)
+
+def fetch_law_list(category: int = 1) -> List[Dict[str, str]]:
+    """
+    category: 1 is commonly used in examples (all current laws).
+    Returns list of {law_id, law_name, law_no}
+    """
+    root = _get_xml(f"{BASE_V1}/lawlists/{category}")
+    out = []
+
+    # Attempt to find LawList elements regardless of exact nesting
+    for law in root.xpath(".//*[local-name()='LawList']"):
+        law_id = law.findtext(".//*[local-name()='LawID']") or law.findtext(".//*[local-name()='LawId']")
+        law_name = law.findtext(".//*[local-name()='LawName']")
+        law_no = law.findtext(".//*[local-name()='LawNo']") or law.findtext(".//*[local-name()='LawNum']")
+        if law_id and law_name:
+            out.append({"law_id": law_id.strip(), "law_name": law_name.strip(), "law_no": (law_no or "").strip()})
+
+    # Some responses may use LawInfo nodes
+    if not out:
+        for law in root.xpath(".//*[local-name()='LawInfo']"):
+            law_id = law.findtext(".//*[local-name()='LawID']") or law.findtext(".//*[local-name()='LawId']")
+            law_name = law.findtext(".//*[local-name()='LawName']")
+            law_no = law.findtext(".//*[local-name()='LawNo']") or law.findtext(".//*[local-name()='LawNum']")
+            if law_id and law_name:
+                out.append({"law_id": law_id.strip(), "law_name": law_name.strip(), "law_no": (law_no or "").strip()})
+    return out
+
+def fetch_law_text(law_id: str) -> Tuple[str, str]:
+    """
+    Returns (title, plain_text) for a given law_id.
+    """
+    root = _get_xml(f"{BASE_V1}/lawdata/{law_id}")
+    title = root.findtext(".//*[local-name()='LawName']") or ""
+
+    # Extract text from the main law body if present
+    body_nodes = (
+        root.xpath(".//*[local-name()='LawFullText']")
+        or root.xpath(".//*[local-name()='LawBody']")
+        or [root]
+    )
+
+    texts = []
+    for n in body_nodes:
+        texts.append(" ".join(t.strip() for t in n.itertext() if t and t.strip()))
+    full_text = "\n".join([t for t in texts if t]).strip()
+    return title.strip(), full_text
+
+def collect_laws_by_keywords(keywords: List[str], max_laws: int = 30, category: int = 1) -> List[Dict[str, str]]:
+    laws = fetch_law_list(category=category)
+    hits = []
+    for law in laws:
+        name = law["law_name"]
+        if any(k in name for k in keywords):
+            hits.append(law)
+        if len(hits) >= max_laws:
+            break
+
+    out_docs = []
+    for law in hits:
+        title, text = fetch_law_text(law["law_id"])
+        url = f"https://laws.e-gov.go.jp/law/{law['law_id']}"
+        out_docs.append({
+            "source": "egov",
+            "title": title or law["law_name"],
+            "url": url,
+            "content": text,
+            "extra": {"law_id": law["law_id"], "law_no": law.get("law_no", "")},
+        })
+    return out_docs
+
+from typing import List
+from sentence_transformers import SentenceTransformer
+
+_model_cache = {}
+
+def embed_texts(texts: List[str], model_name: str, normalize: bool = True) -> List[List[float]]:
+    if model_name not in _model_cache:
+        _model_cache[model_name] = SentenceTransformer(model_name)
+    model = _model_cache[model_name]
+
+    vecs = model.encode(
+        texts,
+        batch_size=32,
+        show_progress_bar=False,
+        normalize_embeddings=normalize,
+    )
+    # Convert to python lists
+    return [v.tolist() for v in vecs]
+
+import os
+import yaml
+from tqdm import tqdm
+from typing import Dict, List
+
+from text_utils import chunk_text, clean_text
+from egov import collect_laws_by_keywords
+from nta import crawl_nta
+from embed import embed_texts
+from upsert import sha1, upsert_documents_and_chunks
+
+def load_config(path: str) -> Dict:
+    with open(path, "r", encoding="utf-8") as f:
+        return yaml.safe_load(f)
+
+def main():
+    cfg = load_config("sources.yaml")
+
+    docs: List[Dict] = []
+
+    # 1) e-Gov laws
+    if cfg.get("egov", {}).get("enabled", False):
+        keywords = cfg["egov"].get("keywords", [])
+        max_laws = int(cfg["egov"].get("max_laws", 30))
+        docs.extend(collect_laws_by_keywords(keywords=keywords, max_laws=max_laws, category=1))
+
+    # 2) NTA crawl
+    if cfg.get("nta", {}).get("enabled", False):
+        seeds = cfg["nta"].get("seeds", [])
+        max_pages = int(cfg["nta"].get("max_pages", 400))
+        delay = float(cfg["nta"].get("delay_seconds", 0.5))
+        docs.extend(crawl_nta(seeds=seeds, max_pages=max_pages, delay_seconds=delay))
+
+    # normalize and id/hash
+    normalized_docs: List[Dict] = []
+    for d in docs:
+        content = clean_text(d.get("content", ""))
+        if not content or len(content) < 80:
+            continue
+        doc_id = sha1(f"{d['source']}|{d['url']}")
+        content_hash = sha1(content)
+        normalized_docs.append({
+            "id": doc_id,
+            "source": d["source"],
+            "title": d.get("title") or d["url"],
+            "url": d["url"],
+            "content": content,
+            "content_hash": content_hash,
+            "extra": d.get("extra", {}),
+        })
+
+    # chunk
+    ch_cfg = cfg.get("chunking", {})
+    max_chars = int(ch_cfg.get("max_chars", 1200))
+    overlap = int(ch_cfg.get("overlap_chars", 200))
+
+    chunks_by_doc: Dict[str, List[Dict]] = {}
+    all_chunk_texts: List[str] = []
+    all_chunk_refs: List[tuple] = []  # (doc_id, chunk_index, content, content_hash)
+
+    for d in normalized_docs:
+        chunks = chunk_text(d["content"], max_chars=max_chars, overlap_chars=overlap)
+        for i, c in enumerate(chunks):
+            h = sha1(c)
+            all_chunk_texts.append(c)
+            all_chunk_refs.append((d["id"], i, c, h))
+
+    # embedding
+    emb_cfg = cfg.get("embedding", {})
+    model_name = emb_cfg.get("model", "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
+    normalize = bool(emb_cfg.get("normalize", True))
+
+    embeddings: List[List[float]] = []
+    batch = 64
+    for i in tqdm(range(0, len(all_chunk_texts), batch), desc="Embedding"):
+        embeddings.extend(embed_texts(all_chunk_texts[i:i+batch], model_name=model_name, normalize=normalize))
+
+    # assign embeddings to chunks_by_doc
+    for (doc_id, idx, c, h), emb in zip(all_chunk_refs, embeddings):
+        chunks_by_doc.setdefault(doc_id, []).append({
+            "chunk_index": idx,
+            "content": c,
+            "content_hash": h,
+            "embedding": emb,
+        })
+
+    # upsert to DB
+    db_url = os.environ.get("SUPABASE_DB_URL")
+    if not db_url:
+        raise RuntimeError("Missing SUPABASE_DB_URL environment variable")
+
+    print(f"Docs: {len(normalized_docs)} / Chunks: {len(all_chunk_refs)}")
+    upsert_documents_and_chunks(db_url=db_url, docs=normalized_docs, chunks_by_doc=chunks_by_doc)
+    print("Done.")
+
+if __name__ == "__main__":
+    main()
+
+import time
+import re
+import urllib.parse
+from typing import Dict, List, Set, Tuple, Optional
+
+import requests
+from bs4 import BeautifulSoup
+
+ALLOWED_HOST = "www.nta.go.jp"
+
+DEFAULT_ALLOWED_PREFIXES = [
+    "https://www.nta.go.jp/law/tsutatsu/",
+    "https://www.nta.go.jp/law/shitsugi/",
+    "https://www.nta.go.jp/taxes/shiraberu/taxanswer/",
+]
+
+def _is_allowed(url: str, allowed_prefixes: List[str]) -> bool:
+    return any(url.startswith(p) for p in allowed_prefixes)
+
+def _normalize_url(url: str, base_url: str) -> Optional[str]:
+    try:
+        url = urllib.parse.urljoin(base_url, url)
+        parsed = urllib.parse.urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            return None
+        if parsed.netloc and parsed.netloc != ALLOWED_HOST:
+            return None
+        # drop fragments
+        parsed = parsed._replace(fragment="")
+        return parsed.geturl()
+    except Exception:
+        return None
+
+def _extract_text_and_title(html: str) -> Tuple[str, str]:
+    soup = BeautifulSoup(html, "lxml")
+
+    # Remove noisy elements
+    for tag in soup(["script", "style", "noscript"]):
+        tag.decompose()
+
+    title = ""
+    if soup.title and soup.title.string:
+        title = soup.title.string.strip()
+
+    h1 = soup.find("h1")
+    if h1 and h1.get_text(strip=True):
+        title = h1.get_text(strip=True)
+
+    # main text
+    text = soup.get_text("\n", strip=True)
+    # Basic cleanup
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return title, text
+
+def crawl_nta(seeds: List[str], max_pages: int = 400, delay_seconds: float = 0.5, allowed_prefixes: Optional[List[str]] = None) -> List[Dict[str, str]]:
+    allowed_prefixes = allowed_prefixes or DEFAULT_ALLOWED_PREFIXES
+
+    seen: Set[str] = set()
+    queue: List[str] = []
+
+    for s in seeds:
+        if _is_allowed(s, allowed_prefixes):
+            queue.append(s)
+
+    docs: List[Dict[str, str]] = []
+
+    session = requests.Session()
+    session.headers.update({"User-Agent": "tax-rag-mvp/0.1 (+https://example.invalid)"})
+
+    while queue and len(seen) < max_pages:
+        url = queue.pop(0)
+        if url in seen:
+            continue
+        seen.add(url)
+
+        try:
+            r = session.get(url, timeout=30)
+            if r.status_code != 200:
+                continue
+            ctype = r.headers.get("content-type", "")
+            if "text/html" not in ctype:
+                continue
+
+            html = r.text
+            title, text = _extract_text_and_title(html)
+
+            # Store doc
+            docs.append({
+                "source": "nta",
+                "title": title or url,
+                "url": url,
+                "content": text,
+                "extra": {},
+            })
+
+            # Extract links
+            soup = BeautifulSoup(html, "lxml")
+            for a in soup.find_all("a", href=True):
+                href = a.get("href")
+                if not href:
+                    continue
+                nurl = _normalize_url(href, url)
+                if not nurl:
+                    continue
+                if not _is_allowed(nurl, allowed_prefixes):
+                    continue
+                # Skip obvious binary
+                if re.search(r"\.(pdf|zip|xls|xlsx|doc|docx)$", nurl, re.IGNORECASE):
+                    continue
+                if nurl not in seen:
+                    queue.append(nurl)
+
+        finally:
+            time.sleep(delay_seconds)
+
+    return docs
+
+requests==2.32.3
+beautifulsoup4==4.12.3
+lxml==5.3.0
+pyyaml==6.0.2
+tqdm==4.66.6
+psycopg2-binary==2.9.9
+sentence-transformers==3.0.1
+
+egov:
+  enabled: true
+  keywords:
+    - 所得税法
+  max_laws: 1
+
+nta:
+  enabled: false
+
+chunking:
+  max_chars: 1200
+  overlap_chars: 200
+
+embedding:
+  model: sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
+  normalize: true
+
+import re
+from typing import List
+
+def clean_text(text: str) -> str:
+    # Normalize whitespace but keep paragraph breaks
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    # Remove excessive blank lines
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    # Trim lines
+    text = "\n".join(line.strip() for line in text.split("\n"))
+    # Collapse multiple spaces
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    return text.strip()
+
+def _split_long_para(para: str, max_chars: int) -> List[str]:
+    # Split by Japanese sentence end if possible
+    if len(para) <= max_chars:
+        return [para]
+    parts = re.split(r"(。|\.|！|!|？|\?)", para)
+    # Recombine keeping punctuation
+    sents = []
+    buf = ""
+    for i in range(0, len(parts), 2):
+        seg = parts[i]
+        punc = parts[i+1] if i+1 < len(parts) else ""
+        piece = (seg + punc).strip()
+        if not piece:
+            continue
+        if len(buf) + len(piece) + 1 <= max_chars:
+            buf += piece
+        else:
+            if buf:
+                sents.append(buf)
+            buf = piece
+    if buf:
+        sents.append(buf)
+
+    # If still too long (no punctuation), hard split
+    out = []
+    for s in sents:
+        if len(s) <= max_chars:
+            out.append(s)
+        else:
+            for j in range(0, len(s), max_chars):
+                out.append(s[j:j+max_chars])
+    return out
+
+def chunk_text(text: str, max_chars: int = 1200, overlap_chars: int = 200) -> List[str]:
+    text = clean_text(text)
+    if not text:
+        return []
+
+    paras = [p.strip() for p in re.split(r"\n{2,}", text) if p.strip()]
+    # Expand long paragraphs
+    expanded: List[str] = []
+    for p in paras:
+        expanded.extend(_split_long_para(p, max_chars))
+
+    chunks: List[str] = []
+    buf = ""
+    for p in expanded:
+        if not buf:
+            buf = p
+            continue
+        if len(buf) + 2 + len(p) <= max_chars:
+            buf = buf + "\n\n" + p
+        else:
+            chunks.append(buf)
+            # overlap: carry tail of previous chunk
+            tail = buf[-overlap_chars:] if overlap_chars > 0 and len(buf) > overlap_chars else ""
+            buf = (tail + "\n\n" + p).strip() if tail else p
+
+    if buf:
+        chunks.append(buf)
+
+    # Final cleanup
+    return [clean_text(c) for c in chunks if clean_text(c)]
+
+import hashlib
+from typing import Dict, List, Tuple
+import psycopg2
+import psycopg2.extras
+
+def sha1(s: str) -> str:
+    return hashlib.sha1(s.encode("utf-8")).hexdigest()
+
+def vec_literal(v: List[float]) -> str:
+    # pgvector literal: [0.1,0.2,...]
+    return "[" + ",".join(f"{x:.6f}" for x in v) + "]"
+
+def upsert_documents_and_chunks(db_url: str, docs: List[Dict], chunks_by_doc: Dict[str, List[Dict]]):
+    conn = psycopg2.connect(db_url)
+    conn.autocommit = False
+    try:
+        with conn.cursor() as cur:
+            # Upsert documents
+            for doc in docs:
+                cur.execute(
+                    """
+                    insert into public.documents (id, source, title, url, retrieved_at, content_hash, is_active)
+                    values (%s, %s, %s, %s, now(), %s, true)
+                    on conflict (id) do update set
+                      source = excluded.source,
+                      title = excluded.title,
+                      url = excluded.url,
+                      retrieved_at = excluded.retrieved_at,
+                      content_hash = excluded.content_hash,
+                      is_active = true
+                    """,
+                    (doc["id"], doc["source"], doc.get("title"), doc["url"], doc["content_hash"]),
+                )
+
+            # Upsert chunks
+            for doc_id, chunks in chunks_by_doc.items():
+                for ch in chunks:
+                    cur.execute(
+                        """
+                        insert into public.chunks (doc_id, chunk_index, content, content_hash, embedding, retrieved_at)
+                        values (%s, %s, %s, %s, %s::vector, now())
+                        on conflict (doc_id, chunk_index) do update set
+                          content = excluded.content,
+                          content_hash = excluded.content_hash,
+                          embedding = excluded.embedding,
+                          retrieved_at = excluded.retrieved_at
+                        """,
+                        (doc_id, ch["chunk_index"], ch["content"], ch["content_hash"], vec_literal(ch["embedding"])),
+                    )
+
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+set "SUPABASE_DB_URL=postgresql://postgres:e1021211@db.hvnhziuhfajlqokhrygo.supabase.co:5432/postgres?sslmode=require"
