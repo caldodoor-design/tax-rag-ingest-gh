@@ -57,6 +57,13 @@ nta:
     - "/pdf/"
     - "\\.pdf$"
 
+  skip_save_title_regex:
+    - "目次"
+    - "一覧"
+  skip_save_url_regex:
+    - "/mokuji\\.htm"
+    - "/index\\.htm"
+
 nta_sochiho:
   enabled: true
   max_pages: 2500
