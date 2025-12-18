@@ -1,10 +1,27 @@
 from typing import Dict, List, Any, Tuple
+import hashlib
+
 import psycopg2
 from psycopg2.extras import execute_values
 
+
+def sha1(x: Any) -> str:
+    """
+    ingest.py が import するやつ。文字列(UTF-8)でSHA1 hexを返す。
+    """
+    if x is None:
+        x = ""
+    if isinstance(x, (bytes, bytearray)):
+        b = bytes(x)
+    else:
+        b = str(x).encode("utf-8")
+    return hashlib.sha1(b).hexdigest()
+
+
 def _doc_id(doc: Dict[str, Any]) -> str:
-    # 既存実装に合わせて安定ID。idが無ければ source:url にする
+    # 安定ID：idが無ければ source:url
     return doc.get("id") or f"{doc['source']}:{doc['url']}"
+
 
 def _vec_to_pgvector(v) -> str:
     # list/tuple/numpy を想定して pgvector の文字列へ
@@ -12,16 +29,24 @@ def _vec_to_pgvector(v) -> str:
         v = v.tolist()
     return "[" + ",".join(str(float(x)) for x in v) + "]"
 
-def upsert_documents_and_chunks(db_url: str, docs: List[Dict[str, Any]], chunks_by_doc: Dict[str, List[Dict[str, Any]]]):
+
+def upsert_documents_and_chunks(
+    db_url: str,
+    docs: List[Dict[str, Any]],
+    chunks_by_doc: Dict[str, List[Dict[str, Any]]],
+):
     if not docs:
         print("[upsert] no docs")
         return
 
-    # doc_id を確定
+    # doc_id と content_hash を確定
     normalized_docs: List[Dict[str, Any]] = []
     for d in docs:
         dd = dict(d)
         dd["id"] = _doc_id(dd)
+        # 念のため content_hash が無い場合は本文から作る
+        if not dd.get("content_hash"):
+            dd["content_hash"] = sha1(dd.get("content", ""))
         normalized_docs.append(dd)
 
     doc_ids = [d["id"] for d in normalized_docs]
@@ -37,23 +62,26 @@ def upsert_documents_and_chunks(db_url: str, docs: List[Dict[str, Any]], chunks_
                 )
                 existing = {row[0]: row[1] for row in cur.fetchall()}
 
-                changed_ids = []
+                changed_ids: List[str] = []
                 docs_rows: List[Tuple] = []
+
                 for d in normalized_docs:
                     did = d["id"]
                     new_hash = d["content_hash"]
                     old_hash = existing.get(did)
                     if old_hash == new_hash:
-                        continue  # ✅ 同じなら何もしない
+                        continue  # ✅ 同じなら何もしない（上書きしない）
                     changed_ids.append(did)
-                    docs_rows.append((
-                        did,
-                        d["source"],
-                        d.get("title"),
-                        d["url"],
-                        new_hash,
-                        True,
-                    ))
+                    docs_rows.append(
+                        (
+                            did,
+                            d["source"],
+                            d.get("title"),
+                            d["url"],
+                            new_hash,
+                            True,
+                        )
+                    )
 
                 if not changed_ids:
                     print("[upsert] no changes (skip)")
@@ -87,25 +115,35 @@ def upsert_documents_and_chunks(db_url: str, docs: List[Dict[str, Any]], chunks_
                 for did in changed_ids:
                     chunks = chunks_by_doc.get(did, [])
                     for c in chunks:
+                        content = c.get("content", "")
+                        chash = c.get("content_hash") or sha1(content)
                         emb = c["embedding"]
-                        chunk_rows.append((
-                            did,
-                            int(c["chunk_index"]),
-                            c["content"],
-                            c["content_hash"],
-                            _vec_to_pgvector(emb),
-                        ))
+                        chunk_rows.append(
+                            (
+                                did,
+                                int(c["chunk_index"]),
+                                content,
+                                chash,
+                                _vec_to_pgvector(emb),
+                            )
+                        )
 
-                if chunk_rows:
+                # 大量insertは分割して進捗を出す（安心用）
+                PAGE = 500
+                total = len(chunk_rows)
+                for i in range(0, total, PAGE):
+                    batch = chunk_rows[i : i + PAGE]
                     execute_values(
                         cur,
                         """
                         insert into public.chunks (doc_id, chunk_index, content, content_hash, embedding)
                         values %s
                         """,
-                        chunk_rows,
+                        batch,
                         template="(%s,%s,%s,%s,%s::vector)",
+                        page_size=len(batch),
                     )
+                    print(f"[upsert] chunks inserted: {i+len(batch)}/{total}")
 
         print(f"[upsert] updated docs={len(changed_ids)} chunks={len(chunk_rows)}")
     finally:
