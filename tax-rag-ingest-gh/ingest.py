@@ -9,36 +9,50 @@ from nta import crawl_nta
 from embed import embed_texts
 from upsert import sha1, upsert_documents_and_chunks
 
+
 def load_config(path: str) -> Dict:
     with open(path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+        return yaml.safe_load(f) or {}
+
 
 def main():
     cfg = load_config("sources.yaml")
 
     docs: List[Dict] = []
 
-# 1) e-Gov laws
-if cfg.get("egov", {}).get("enabled", False):
-    keywords = cfg["egov"].get("keywords", [])
-    max_laws = int(cfg["egov"].get("max_laws", 30))
-    docs.extend(collect_laws_by_keywords(keywords=keywords, max_laws=max_laws, category=1))
-
-# 2) NTA crawl
-if cfg.get("nta", {}).get("enabled", False):
-    nt = cfg["nta"]
-    docs.extend(
-        crawl_nta(
-            seeds=nt.get("seeds", []),
-            max_pages=int(nt.get("max_pages", 100)),
-            delay_seconds=float(nt.get("delay_seconds", 0.6)),
-            allowed_prefixes=nt.get("allowed_prefixes"),
-            exclude_url_regex=nt.get("exclude_url_regex"),
+    # 1) e-Gov laws
+    if cfg.get("egov", {}).get("enabled", False):
+        eg = cfg["egov"]
+        keywords = eg.get("keywords", [])
+        max_laws = int(eg.get("max_laws", 500))
+        category = int(eg.get("category", 1))
+        docs.extend(
+            collect_laws_by_keywords(
+                keywords=keywords,
+                max_laws=max_laws,
+                category=category,
+                exact_allow=eg.get("exact_allow"),
+                prefix_allow=eg.get("prefix_allow"),
+                include_suffixes=eg.get("include_suffixes"),
+                exclude_phrases=eg.get("exclude_phrases"),
+            )
         )
-    )
 
-
-
+    # 2) NTA crawl（基本通達）
+    if cfg.get("nta", {}).get("enabled", False):
+        nt = cfg["nta"]
+        seeds = nt.get("seeds", [])
+        max_pages = int(nt.get("max_pages", 100))
+        delay = float(nt.get("delay_seconds", 0.6))
+        docs.extend(
+            crawl_nta(
+                seeds=seeds,
+                max_pages=max_pages,
+                delay_seconds=delay,
+                allowed_prefixes=nt.get("allowed_prefixes"),
+                exclude_url_regex=nt.get("exclude_url_regex"),
+            )
+        )
 
     # normalize and id/hash
     normalized_docs: List[Dict] = []
@@ -48,15 +62,17 @@ if cfg.get("nta", {}).get("enabled", False):
             continue
         doc_id = sha1(f"{d['source']}|{d['url']}")
         content_hash = sha1(content)
-        normalized_docs.append({
-            "id": doc_id,
-            "source": d["source"],
-            "title": d.get("title") or d["url"],
-            "url": d["url"],
-            "content": content,
-            "content_hash": content_hash,
-            "extra": d.get("extra", {}),
-        })
+        normalized_docs.append(
+            {
+                "id": doc_id,
+                "source": d["source"],
+                "title": d.get("title") or d["url"],
+                "url": d["url"],
+                "content": content,
+                "content_hash": content_hash,
+                "extra": d.get("extra", {}),
+            }
+        )
 
     # chunk
     ch_cfg = cfg.get("chunking", {})
@@ -76,22 +92,32 @@ if cfg.get("nta", {}).get("enabled", False):
 
     # embedding
     emb_cfg = cfg.get("embedding", {})
-    model_name = emb_cfg.get("model", "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
+    model_name = emb_cfg.get(
+        "model", "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+    )
     normalize = bool(emb_cfg.get("normalize", True))
 
     embeddings: List[List[float]] = []
     batch = 64
     for i in tqdm(range(0, len(all_chunk_texts), batch), desc="Embedding"):
-        embeddings.extend(embed_texts(all_chunk_texts[i:i+batch], model_name=model_name, normalize=normalize))
+        embeddings.extend(
+            embed_texts(
+                all_chunk_texts[i : i + batch],
+                model_name=model_name,
+                normalize=normalize,
+            )
+        )
 
     # assign embeddings to chunks_by_doc
     for (doc_id, idx, c, h), emb in zip(all_chunk_refs, embeddings):
-        chunks_by_doc.setdefault(doc_id, []).append({
-            "chunk_index": idx,
-            "content": c,
-            "content_hash": h,
-            "embedding": emb,
-        })
+        chunks_by_doc.setdefault(doc_id, []).append(
+            {
+                "chunk_index": idx,
+                "content": c,
+                "content_hash": h,
+                "embedding": emb,
+            }
+        )
 
     # upsert to DB
     db_url = os.environ.get("SUPABASE_DB_URL")
@@ -101,6 +127,7 @@ if cfg.get("nta", {}).get("enabled", False):
     print(f"Docs: {len(normalized_docs)} / Chunks: {len(all_chunk_refs)}")
     upsert_documents_and_chunks(db_url=db_url, docs=normalized_docs, chunks_by_doc=chunks_by_doc)
     print("Done.")
+
 
 if __name__ == "__main__":
     main()
