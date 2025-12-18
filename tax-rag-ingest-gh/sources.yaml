@@ -104,6 +104,23 @@ nta_shitsugi:
   skip_save_url_regex:
     - "/index\\.htm"
 
+taxanswer:
+  enabled: true
+  max_pages: 6000
+  delay_seconds: 0.6
+  seeds:
+    - https://www.nta.go.jp/taxes/shiraberu/taxanswer/
+  allowed_prefixes:
+    - https://www.nta.go.jp/taxes/shiraberu/taxanswer/
+  exclude_url_regex:
+    - "/pdf/"
+    - "\\.pdf$"
+  skip_save_title_regex:
+    - "一覧"
+  skip_save_url_regex:
+    - "/index\\.htm"
+
+
 chunking:
   max_chars: 1200
   overlap_chars: 200
