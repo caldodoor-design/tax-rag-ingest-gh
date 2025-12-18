@@ -18,11 +18,11 @@ def main():
 
     docs: List[Dict] = []
 
-    # 1) e-Gov laws
-    if cfg.get("egov", {}).get("enabled", False):
-        keywords = cfg["egov"].get("keywords", [])
-        max_laws = int(cfg["egov"].get("max_laws", 30))
-        docs.extend(collect_laws_by_keywords(keywords=keywords, max_laws=max_laws, category=1))
+# 1) e-Gov laws
+if cfg.get("egov", {}).get("enabled", False):
+    keywords = cfg["egov"].get("keywords", [])
+    max_laws = int(cfg["egov"].get("max_laws", 30))
+    docs.extend(collect_laws_by_keywords(keywords=keywords, max_laws=max_laws, category=1))
 
 # 2) NTA crawl
 if cfg.get("nta", {}).get("enabled", False):
@@ -36,6 +36,7 @@ if cfg.get("nta", {}).get("enabled", False):
             exclude_url_regex=nt.get("exclude_url_regex"),
         )
     )
+
 
 
 
