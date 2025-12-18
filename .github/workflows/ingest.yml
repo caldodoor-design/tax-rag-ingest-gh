@@ -22,6 +22,45 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Force IPv4 DSN
+        working-directory: tax-rag-ingest-gh
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          python - <<'PY'
+          import os, socket, sys
+          from urllib.parse import urlparse, parse_qs, unquote
+
+          url = os.environ["SUPABASE_DB_URL"]
+          u = urlparse(url)
+
+          host = u.hostname
+          port = u.port or 5432
+
+          # Resolve IPv4 only
+          ip = None
+          for res in socket.getaddrinfo(host, port, family=socket.AF_INET, type=socket.SOCK_STREAM):
+              ip = res[4][0]
+              break
+          if not ip:
+              print("Failed to resolve IPv4 for host:", host, file=sys.stderr)
+              sys.exit(1)
+
+          user = unquote(u.username or "postgres")
+          pwd  = unquote(u.password or "")
+          db   = (u.path or "/postgres").lstrip("/") or "postgres"
+
+          q = parse_qs(u.query)
+          sslmode = q.get("sslmode", ["require"])[0]
+
+          dsn = f"host={host} hostaddr={ip} port={port} dbname={db} user={user} password={pwd} sslmode={sslmode}"
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as f:
+              f.write("SUPABASE_DB_URL<<EOF\n" + dsn + "\nEOF\n")
+
+          print("Using IPv4 hostaddr:", ip)
+          PY
+
+
       - name: Run ingest
         working-directory: tax-rag-ingest-gh
         env:
