@@ -19,24 +19,21 @@ def load_config(path: str) -> Dict:
 
 def _call_collect_laws_by_keywords(cfg_egov: Dict) -> List[Dict]:
     """
-    egov.collect_laws_by_keywords の引数が環境/版で揺れても落ちないように、
+    egov.collect_laws_by_keywords の引数が版で揺れても落ちないように、
     signatureを見て渡せるものだけ渡す。
     """
     sig = inspect.signature(collect_laws_by_keywords)
     kwargs = {}
 
-    # 必須になりがちなもの
     if "keywords" in sig.parameters:
         kwargs["keywords"] = cfg_egov.get("keywords", [])
 
     if "max_laws" in sig.parameters:
         kwargs["max_laws"] = int(cfg_egov.get("max_laws", 500))
 
-    # ある版と無い版がある
     if "category" in sig.parameters and cfg_egov.get("category") is not None:
         kwargs["category"] = int(cfg_egov.get("category"))
 
-    # フィルタ系（実装がある時だけ渡す）
     for key in ["exact_allow", "prefix_allow", "include_suffixes", "exclude_phrases"]:
         if key in sig.parameters and cfg_egov.get(key) is not None:
             kwargs[key] = cfg_egov.get(key)
@@ -44,9 +41,10 @@ def _call_collect_laws_by_keywords(cfg_egov: Dict) -> List[Dict]:
     return collect_laws_by_keywords(**kwargs)
 
 
-def _crawl_block(cfg_block: Dict, kind: str) -> List[Dict]:
+def _crawl_html_block(cfg_block: Dict, kind: str) -> List[Dict]:
     """
-    NTA側：基本通達/措置法通達/質疑応答事例 などを同じクローラで回す
+    NTAサイト内HTMLをクロールする共通ブロック
+    (基本通達 / 措置法通達 / 質疑応答 / タックスアンサー等)
     """
     return crawl_nta(
         seeds=cfg_block.get("seeds", []),
@@ -62,7 +60,6 @@ def _crawl_block(cfg_block: Dict, kind: str) -> List[Dict]:
 
 def main():
     cfg = load_config("sources.yaml")
-
     docs: List[Dict] = []
 
     # 1) e-Gov
@@ -71,17 +68,21 @@ def main():
 
     # 2) NTA 基本通達
     if cfg.get("nta", {}).get("enabled", False):
-        docs.extend(_crawl_block(cfg["nta"], kind="kihon"))
+        docs.extend(_crawl_html_block(cfg["nta"], kind="kihon"))
 
     # 3) NTA 措置法通達
     if cfg.get("nta_sochiho", {}).get("enabled", False):
-        docs.extend(_crawl_block(cfg["nta_sochiho"], kind="sochiho"))
+        docs.extend(_crawl_html_block(cfg["nta_sochiho"], kind="sochiho"))
 
     # 4) NTA 質疑応答事例
     if cfg.get("nta_shitsugi", {}).get("enabled", False):
-        docs.extend(_crawl_block(cfg["nta_shitsugi"], kind="shitsugi"))
+        docs.extend(_crawl_html_block(cfg["nta_shitsugi"], kind="shitsugi"))
 
-    # ---- normalize docs (documentsには本文を入れず、chunksに本文を入れる) ----
+    # 5) Tax Answer（タックスアンサー）
+    if cfg.get("taxanswer", {}).get("enabled", False):
+        docs.extend(_crawl_html_block(cfg["taxanswer"], kind="taxanswer"))
+
+    # ---- normalize docs ----
     normalized_docs: List[Dict] = []
     for d in docs:
         content = clean_text(d.get("content", ""))
@@ -102,13 +103,12 @@ def main():
                 "title": title,
                 "url": url,
                 "content_hash": content_hash,
-                "content": content,  # chunks化のために手元では持つ
-                "is_active": True,
+                "content": content,  # chunks化のために一時的に保持
             }
         )
 
     # ---- chunking ----
-    ch_cfg = cfg.get("chunking", {})
+    ch_cfg = cfg.get("chunking", {}) or {}
     max_chars = int(ch_cfg.get("max_chars", 1200))
     overlap = int(ch_cfg.get("overlap_chars", 200))
 
@@ -123,19 +123,18 @@ def main():
             all_chunk_refs.append((d["id"], i, c, h))
 
     # ---- embedding ----
-    emb_cfg = cfg.get("embedding", {})
+    emb_cfg = cfg.get("embedding", {}) or {}
     model_name = emb_cfg.get(
         "model", "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
     )
     normalize = bool(emb_cfg.get("normalize", True))
+    outer_batch = int(emb_cfg.get("batch_size", 64))
 
     embeddings: List[List[float]] = []
-    batch = int(emb_cfg.get("batch_size", 64))
-
-    for i in tqdm(range(0, len(all_chunk_texts), batch), desc="Embedding"):
+    for i in tqdm(range(0, len(all_chunk_texts), outer_batch), desc="Embedding"):
         embeddings.extend(
             embed_texts(
-                all_chunk_texts[i : i + batch],
+                all_chunk_texts[i : i + outer_batch],
                 model_name=model_name,
                 normalize=normalize,
             )
@@ -164,7 +163,6 @@ def main():
             "title": d["title"],
             "url": d["url"],
             "content_hash": d["content_hash"],
-            "is_active": d["is_active"],
         }
         for d in normalized_docs
     ]
