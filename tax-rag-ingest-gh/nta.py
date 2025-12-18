@@ -69,12 +69,18 @@ def crawl_nta(
     allowed_prefixes: Optional[List[str]] = None,
     exclude_url_regex: Optional[List[str]] = None,
     extra_defaults: Optional[dict] = None,
+    skip_save_title_regex: Optional[List[str]] = None,
+    skip_save_url_regex: Optional[List[str]] = None,
+
 ) -> List[Dict[str, str]]:
     if not allowed_prefixes:
         # これが “基本通達” の大元。ここ配下だけを辿る前提
         allowed_prefixes = ["https://www.nta.go.jp/law/tsutatsu/kihon/"]
 
     exclude_patterns = _compile_regex_list(exclude_url_regex)
+    skip_title_patterns = _compile_regex_list(skip_save_title_regex)
+    skip_url_patterns = _compile_regex_list(skip_save_url_regex)
+
 
     seen: Set[str] = set()
     queue: List[str] = []
