@@ -87,6 +87,22 @@ nta_sochiho:
     - "/pdf/"
     - "\\.pdf$"
 
+nta_shitsugi:
+  enabled: true
+  max_pages: 2000
+  delay_seconds: 0.6
+  seeds:
+    - https://www.nta.go.jp/law/shitsugi/01.htm
+  allowed_prefixes:
+    - https://www.nta.go.jp/law/shitsugi/
+  exclude_url_regex:
+    - "/pdf/"
+    - "\\.pdf$"
+  skip_save_title_regex:
+    - "目次"
+    - "一覧"
+  skip_save_url_regex:
+    - "/index\\.htm"
 
 chunking:
   max_chars: 1200
