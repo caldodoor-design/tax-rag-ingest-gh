@@ -52,6 +52,9 @@ def main():
                 allowed_prefixes=nt.get("allowed_prefixes"),
                 exclude_url_regex=nt.get("exclude_url_regex"),
                 extra_defaults={"nta_kind":"kihon"}
+                skip_save_title_regex=nt.get("skip_save_title_regex"),
+                skip_save_url_regex=nt.get("skip_save_url_regex"),
+
             )
         )
 
@@ -66,6 +69,9 @@ def main():
                 allowed_prefixes=nt.get("allowed_prefixes"),
                 exclude_url_regex=nt.get("exclude_url_regex"),
                 extra_defaults={"nta_kind": "sochiho"},
+                skip_save_title_regex=nt.get("skip_save_title_regex"),
+                skip_save_url_regex=nt.get("skip_save_url_regex"),
+
             )
         )
 
