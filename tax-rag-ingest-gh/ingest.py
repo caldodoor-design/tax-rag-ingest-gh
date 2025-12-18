@@ -51,6 +51,7 @@ def main():
                 delay_seconds=delay,
                 allowed_prefixes=nt.get("allowed_prefixes"),
                 exclude_url_regex=nt.get("exclude_url_regex"),
+                extra_defaults={"nta_kind":"kihon"}
             )
         )
 
