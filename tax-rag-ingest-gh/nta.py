@@ -8,6 +8,7 @@ from bs4 import BeautifulSoup
 
 ALLOWED_HOST = "www.nta.go.jp"
 
+
 def _compile_regex_list(patterns: Optional[List[str]]) -> List[re.Pattern]:
     if not patterns:
         return []
@@ -17,11 +18,14 @@ def _compile_regex_list(patterns: Optional[List[str]]) -> List[re.Pattern]:
             out.append(re.compile(p, re.IGNORECASE))
     return out
 
+
 def _match_any(patterns: List[re.Pattern], text: str) -> bool:
     return any(p.search(text) for p in patterns)
 
+
 def _is_allowed(url: str, allowed_prefixes: List[str]) -> bool:
     return any(url.startswith(p) for p in allowed_prefixes)
+
 
 def _normalize_url(url: str, base_url: str) -> Optional[str]:
     try:
@@ -31,15 +35,15 @@ def _normalize_url(url: str, base_url: str) -> Optional[str]:
             return None
         if parsed.netloc and parsed.netloc != ALLOWED_HOST:
             return None
-        parsed = parsed._replace(fragment="")  # drop fragments
+        parsed = parsed._replace(fragment="")
         return parsed.geturl()
     except Exception:
         return None
 
+
 def _extract_text_and_title(html: str) -> Tuple[str, str]:
     soup = BeautifulSoup(html, "lxml")
 
-    # noisy elements
     for tag in soup(["script", "style", "noscript", "header", "footer", "nav", "aside", "form"]):
         tag.decompose()
 
@@ -57,10 +61,12 @@ def _extract_text_and_title(html: str) -> Tuple[str, str]:
         or soup.find(class_="main")
         or soup.find(class_="mainContents")
     )
+
     target = main or soup.body or soup
     text = target.get_text("\n", strip=True)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return title, text
+
 
 def crawl_nta(
     seeds: List[str],
@@ -71,35 +77,32 @@ def crawl_nta(
     extra_defaults: Optional[dict] = None,
     skip_save_title_regex: Optional[List[str]] = None,
     skip_save_url_regex: Optional[List[str]] = None,
-
 ) -> List[Dict[str, str]]:
     if not allowed_prefixes:
-        # これが “基本通達” の大元。ここ配下だけを辿る前提
-        allowed_prefixes = ["https://www.nta.go.jp/law/tsutatsu/kihon/"]
+        allowed_prefixes = ["https://www.nta.go.jp/"]
 
     exclude_patterns = _compile_regex_list(exclude_url_regex)
     skip_title_patterns = _compile_regex_list(skip_save_title_regex)
     skip_url_patterns = _compile_regex_list(skip_save_url_regex)
 
-
     seen: Set[str] = set()
     queue: List[str] = []
-
-    for s in seeds:
-        if _is_allowed(s, allowed_prefixes):
-            queue.append(s)
-
     docs: List[Dict[str, str]] = []
 
-    session = requests.Session()
-    session.headers.update({"User-Agent": "tax-rag-mvp/0.2 (+https://example.invalid)"})
+    for s in seeds:
+        if s and _is_allowed(s, allowed_prefixes):
+            queue.append(s)
 
-    while queue and len(seen) < max_pages:
+    session = requests.Session()
+    session.headers.update({"User-Agent": "tax-rag-mvp/0.3 (+https://example.invalid)"})
+
+    while queue and len(seen) < int(max_pages):
         url = queue.pop(0)
         if url in seen:
             continue
         if exclude_patterns and _match_any(exclude_patterns, url):
             continue
+
         seen.add(url)
 
         try:
@@ -111,23 +114,30 @@ def crawl_nta(
             if "text/html" not in ctype:
                 continue
 
-            # 日本語ページで文字化け対策
             if (not r.encoding) or (r.encoding.lower() in ("iso-8859-1", "latin-1")):
                 r.encoding = r.apparent_encoding or "utf-8"
 
             html = r.text
             title, text = _extract_text_and_title(html)
 
-            extra = dict(extra_defaults or {})
-            docs.append({
-                "source": "nta",
-                "title": title or url,
-                "url": url,
-                "content": text,
-                "extra": extra,
-            })
+            should_save = True
+            if skip_title_patterns and title and _match_any(skip_title_patterns, title):
+                should_save = False
+            if skip_url_patterns and _match_any(skip_url_patterns, url):
+                should_save = False
 
-            # links
+            extra = dict(extra_defaults or {})
+            if should_save:
+                docs.append(
+                    {
+                        "source": "nta",
+                        "title": title or url,
+                        "url": url,
+                        "content": text,
+                        "extra": extra,
+                    }
+                )
+
             soup = BeautifulSoup(html, "lxml")
             for a in soup.find_all("a", href=True):
                 nurl = _normalize_url(a.get("href"), url)
@@ -143,7 +153,7 @@ def crawl_nta(
                     queue.append(nurl)
 
         finally:
-            time.sleep(delay_seconds)
+            time.sleep(float(delay_seconds))
 
     print(f"[NTA] crawled pages: {len(seen)} docs: {len(docs)}")
     return docs
