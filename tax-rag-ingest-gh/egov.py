@@ -70,7 +70,10 @@ def collect_laws_by_keywords(
     max_laws: int = 30,
     per_keyword_limit: int = 5,
     delay_seconds: float = 0.3,
+    category: Optional[int] = None,
+    **_ignored,
 ) -> List[Dict[str, str]]:
+
     """
     keywords(法令名) → /laws で law_id を引いて → /law_data/{law_id} で本文を取得して docs にして返す
     """
