@@ -1,7 +1,9 @@
 import os
 import yaml
+import inspect
+from typing import Dict, List, Tuple
+
 from tqdm import tqdm
-from typing import Dict, List
 
 from text_utils import chunk_text, clean_text
 from egov import collect_laws_by_keywords
@@ -15,110 +17,103 @@ def load_config(path: str) -> Dict:
         return yaml.safe_load(f) or {}
 
 
+def _call_collect_laws_by_keywords(cfg_egov: Dict) -> List[Dict]:
+    """
+    egov.collect_laws_by_keywords の引数が環境/版で揺れても落ちないように、
+    signatureを見て渡せるものだけ渡す。
+    """
+    sig = inspect.signature(collect_laws_by_keywords)
+    kwargs = {}
+
+    # 必須になりがちなもの
+    if "keywords" in sig.parameters:
+        kwargs["keywords"] = cfg_egov.get("keywords", [])
+
+    if "max_laws" in sig.parameters:
+        kwargs["max_laws"] = int(cfg_egov.get("max_laws", 500))
+
+    # ある版と無い版がある
+    if "category" in sig.parameters and cfg_egov.get("category") is not None:
+        kwargs["category"] = int(cfg_egov.get("category"))
+
+    # フィルタ系（実装がある時だけ渡す）
+    for key in ["exact_allow", "prefix_allow", "include_suffixes", "exclude_phrases"]:
+        if key in sig.parameters and cfg_egov.get(key) is not None:
+            kwargs[key] = cfg_egov.get(key)
+
+    return collect_laws_by_keywords(**kwargs)
+
+
+def _crawl_block(cfg_block: Dict, kind: str) -> List[Dict]:
+    """
+    NTA側：基本通達/措置法通達/質疑応答事例 などを同じクローラで回す
+    """
+    return crawl_nta(
+        seeds=cfg_block.get("seeds", []),
+        max_pages=int(cfg_block.get("max_pages", 1000)),
+        delay_seconds=float(cfg_block.get("delay_seconds", 0.6)),
+        allowed_prefixes=cfg_block.get("allowed_prefixes"),
+        exclude_url_regex=cfg_block.get("exclude_url_regex"),
+        extra_defaults={"nta_kind": kind},
+        skip_save_title_regex=cfg_block.get("skip_save_title_regex"),
+        skip_save_url_regex=cfg_block.get("skip_save_url_regex"),
+    )
+
+
 def main():
     cfg = load_config("sources.yaml")
 
     docs: List[Dict] = []
 
-    # 1) e-Gov laws
+    # 1) e-Gov
     if cfg.get("egov", {}).get("enabled", False):
-        eg = cfg["egov"]
-        keywords = eg.get("keywords", [])
-        max_laws = int(eg.get("max_laws", 500))
-        category = int(eg.get("category", 1))
-        docs.extend(
-            collect_laws_by_keywords(
-                keywords=keywords,
-                max_laws=max_laws,
-                category=category,
-                exact_allow=eg.get("exact_allow"),
-                prefix_allow=eg.get("prefix_allow"),
-                include_suffixes=eg.get("include_suffixes"),
-                exclude_phrases=eg.get("exclude_phrases"),
-            )
-        )
+        docs.extend(_call_collect_laws_by_keywords(cfg["egov"]))
 
-    # 2) NTA crawl（基本通達）
+    # 2) NTA 基本通達
     if cfg.get("nta", {}).get("enabled", False):
-        nt = cfg["nta"]
-        seeds = nt.get("seeds", [])
-        max_pages = int(nt.get("max_pages", 100))
-        delay = float(nt.get("delay_seconds", 0.6))
-        docs.extend(
-            crawl_nta(
-                seeds=seeds,
-                max_pages=max_pages,
-                delay_seconds=delay,
-                allowed_prefixes=nt.get("allowed_prefixes"),
-                exclude_url_regex=nt.get("exclude_url_regex"),
-                extra_defaults={"nta_kind":"kihon"}
-                skip_save_title_regex=nt.get("skip_save_title_regex"),
-                skip_save_url_regex=nt.get("skip_save_url_regex"),
+        docs.extend(_crawl_block(cfg["nta"], kind="kihon"))
 
-            )
-        )
-
-    # 3) NTA sochiho（措置法通達）
+    # 3) NTA 措置法通達
     if cfg.get("nta_sochiho", {}).get("enabled", False):
-        nt = cfg["nta_sochiho"]
-        docs.extend(
-            crawl_nta(
-                seeds=nt.get("seeds", []),
-                max_pages=int(nt.get("max_pages", 2500)),
-                delay_seconds=float(nt.get("delay_seconds", 0.6)),
-                allowed_prefixes=nt.get("allowed_prefixes"),
-                exclude_url_regex=nt.get("exclude_url_regex"),
-                extra_defaults={"nta_kind": "sochiho"},
-                skip_save_title_regex=nt.get("skip_save_title_regex"),
-                skip_save_url_regex=nt.get("skip_save_url_regex"),
+        docs.extend(_crawl_block(cfg["nta_sochiho"], kind="sochiho"))
 
-            )
-        )
-   # 4) NTA shitsugi（質疑応答事例）
-   if cfg.get("nta_shitsugi", {}).get("enabled", False):
-        nt = cfg["nta_shitsugi"]
-        docs.extend(
-            crawl_nta(
-                seeds=nt.get("seeds", []),
-                max_pages=int(nt.get("max_pages", 2000)),
-                delay_seconds=float(nt.get("delay_seconds", 0.6)),
-                allowed_prefixes=nt.get("allowed_prefixes"),
-                exclude_url_regex=nt.get("exclude_url_regex"),
-                extra_defaults={"nta_kind": "shitsugi"},
-                skip_save_title_regex=nt.get("skip_save_title_regex"),
-                skip_save_url_regex=nt.get("skip_save_url_regex"),
-            )
-        )
+    # 4) NTA 質疑応答事例
+    if cfg.get("nta_shitsugi", {}).get("enabled", False):
+        docs.extend(_crawl_block(cfg["nta_shitsugi"], kind="shitsugi"))
 
-    
-    # normalize and id/hash
+    # ---- normalize docs (documentsには本文を入れず、chunksに本文を入れる) ----
     normalized_docs: List[Dict] = []
     for d in docs:
         content = clean_text(d.get("content", ""))
         if not content or len(content) < 80:
             continue
-        doc_id = sha1(f"{d['source']}|{d['url']}")
+
+        source = d.get("source", "unknown")
+        url = d.get("url", "")
+        title = d.get("title") or url
+
+        doc_id = sha1(f"{source}|{url}")
         content_hash = sha1(content)
+
         normalized_docs.append(
             {
                 "id": doc_id,
-                "source": d["source"],
-                "title": d.get("title") or d["url"],
-                "url": d["url"],
-                "content": content,
+                "source": source,
+                "title": title,
+                "url": url,
                 "content_hash": content_hash,
-                "extra": d.get("extra", {}),
+                "content": content,  # chunks化のために手元では持つ
+                "is_active": True,
             }
         )
 
-    # chunk
+    # ---- chunking ----
     ch_cfg = cfg.get("chunking", {})
     max_chars = int(ch_cfg.get("max_chars", 1200))
     overlap = int(ch_cfg.get("overlap_chars", 200))
 
-    chunks_by_doc: Dict[str, List[Dict]] = {}
     all_chunk_texts: List[str] = []
-    all_chunk_refs: List[tuple] = []  # (doc_id, chunk_index, content, content_hash)
+    all_chunk_refs: List[Tuple[str, int, str, str]] = []  # (doc_id, idx, text, hash)
 
     for d in normalized_docs:
         chunks = chunk_text(d["content"], max_chars=max_chars, overlap_chars=overlap)
@@ -127,7 +122,7 @@ def main():
             all_chunk_texts.append(c)
             all_chunk_refs.append((d["id"], i, c, h))
 
-    # embedding
+    # ---- embedding ----
     emb_cfg = cfg.get("embedding", {})
     model_name = emb_cfg.get(
         "model", "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
@@ -135,7 +130,8 @@ def main():
     normalize = bool(emb_cfg.get("normalize", True))
 
     embeddings: List[List[float]] = []
-    batch = 64
+    batch = int(emb_cfg.get("batch_size", 64))
+
     for i in tqdm(range(0, len(all_chunk_texts), batch), desc="Embedding"):
         embeddings.extend(
             embed_texts(
@@ -145,7 +141,7 @@ def main():
             )
         )
 
-    # assign embeddings to chunks_by_doc
+    chunks_by_doc: Dict[str, List[Dict]] = {}
     for (doc_id, idx, c, h), emb in zip(all_chunk_refs, embeddings):
         chunks_by_doc.setdefault(doc_id, []).append(
             {
@@ -156,13 +152,25 @@ def main():
             }
         )
 
-    # upsert to DB
+    # ---- upsert ----
     db_url = os.environ.get("SUPABASE_DB_URL")
     if not db_url:
         raise RuntimeError("Missing SUPABASE_DB_URL environment variable")
 
-    print(f"Docs: {len(normalized_docs)} / Chunks: {len(all_chunk_refs)}")
-    upsert_documents_and_chunks(db_url=db_url, docs=normalized_docs, chunks_by_doc=chunks_by_doc)
+    docs_meta = [
+        {
+            "id": d["id"],
+            "source": d["source"],
+            "title": d["title"],
+            "url": d["url"],
+            "content_hash": d["content_hash"],
+            "is_active": d["is_active"],
+        }
+        for d in normalized_docs
+    ]
+
+    print(f"Docs: {len(docs_meta)} / Chunks: {len(all_chunk_refs)}")
+    upsert_documents_and_chunks(db_url=db_url, docs=docs_meta, chunks_by_doc=chunks_by_doc)
     print("Done.")
 
 
