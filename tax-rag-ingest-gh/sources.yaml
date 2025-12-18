@@ -1,8 +1,11 @@
 egov:
   enabled: true
+  # まずは確実にヒットする“短い”キーワードから
   keywords:
-    - 所得税法
-  max_laws: 1
+    - 所得税
+    - 法人税
+    - 消費税
+  max_laws: 5
 
 nta:
   enabled: false
