@@ -57,6 +57,28 @@ nta:
     - "/pdf/"
     - "\\.pdf$"
 
+nta_sochiho:
+  enabled: true
+  max_pages: 2500
+  delay_seconds: 0.6
+  seeds:
+    - https://www.nta.go.jp/law/tsutatsu/kobetsu/hojin/sochiho/sotihou.htm
+    - https://www.nta.go.jp/law/tsutatsu/kobetsu/shotoku/sochiho/sotihou.htm
+    - https://www.nta.go.jp/law/tsutatsu/kobetsu/kansetsu/sochiho/sotihou.htm
+    - https://www.nta.go.jp/law/tsutatsu/kobetsu/sozoku/sochiho/sotihou.htm
+    - https://www.nta.go.jp/law/tsutatsu/kobetsu/sonota/sochiho/sotihou.htm
+
+  allowed_prefixes:
+    - https://www.nta.go.jp/law/tsutatsu/kobetsu/hojin/sochiho/
+    - https://www.nta.go.jp/law/tsutatsu/kobetsu/shotoku/sochiho/
+    - https://www.nta.go.jp/law/tsutatsu/kobetsu/kansetsu/sochiho/
+    - https://www.nta.go.jp/law/tsutatsu/kobetsu/sozoku/sochiho/
+    - https://www.nta.go.jp/law/tsutatsu/kobetsu/sonota/sochiho/
+
+  exclude_url_regex:
+    - "/kaisei/"
+    - "/pdf/"
+    - "\\.pdf$"
 
 
 chunking:
