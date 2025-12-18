@@ -68,6 +68,7 @@ def crawl_nta(
     delay_seconds: float = 0.6,
     allowed_prefixes: Optional[List[str]] = None,
     exclude_url_regex: Optional[List[str]] = None,
+    extra_defaults: Optional[dict] = None,
 ) -> List[Dict[str, str]]:
     if not allowed_prefixes:
         # これが “基本通達” の大元。ここ配下だけを辿る前提
@@ -111,12 +112,13 @@ def crawl_nta(
             html = r.text
             title, text = _extract_text_and_title(html)
 
+            extra = dict(extra_defaults or {})
             docs.append({
                 "source": "nta",
                 "title": title or url,
                 "url": url,
                 "content": text,
-                "extra": {},
+                "extra": extra,
             })
 
             # links
