@@ -1,15 +1,21 @@
 import os
 import yaml
+import hashlib
 import inspect
 from typing import Dict, List, Tuple
+
 from tqdm import tqdm
+
 from text_utils import chunk_text, clean_text
 from egov import collect_laws_by_keywords
 from nta import crawl_nta
 from kfs import collect_kfs_saiketsu
 from embed import embed_texts
-from upsert import sha1, upsert_documents_and_chunks
+from upsert import upsert_documents_and_chunks
 
+
+def sha1(s: str) -> str:
+    return hashlib.sha1(s.encode("utf-8")).hexdigest()
 
 
 def load_config(path: str) -> Dict:
@@ -19,7 +25,7 @@ def load_config(path: str) -> Dict:
 
 def _call_collect_laws_by_keywords(cfg_egov: Dict) -> List[Dict]:
     """
-    egov.collect_laws_by_keywords の引数が版で揺れても落ちないように、
+    egov.collect_laws_by_keywords の引数が版で揺れても落ちないように
     signatureを見て渡せるものだけ渡す。
     """
     sig = inspect.signature(collect_laws_by_keywords)
@@ -43,8 +49,8 @@ def _call_collect_laws_by_keywords(cfg_egov: Dict) -> List[Dict]:
 
 def _crawl_html_block(cfg_block: Dict, kind: str) -> List[Dict]:
     """
-    NTAサイト内HTMLをクロールする共通ブロック
-    (基本通達 / 措置法通達 / 質疑応答 / タックスアンサー等)
+    www.nta.go.jp の静的HTMLを crawl_nta でクロールする共通ブロック
+    (基本通達 / 措置法通達 / 質疑応答 / TaxAnswer / 個別通達など)
     """
     return crawl_nta(
         seeds=cfg_block.get("seeds", []),
@@ -81,22 +87,36 @@ def main():
     # 5) Tax Answer（タックスアンサー）
     if cfg.get("taxanswer", {}).get("enabled", False):
         docs.extend(_crawl_html_block(cfg["taxanswer"], kind="taxanswer"))
-        
-    # 6) NTA 個別通達（kobetsu）
+
+    # 6) NTA 個別通達
     if cfg.get("nta_kobetsu", {}).get("enabled", False):
         docs.extend(_crawl_html_block(cfg["nta_kobetsu"], kind="kobetsu"))
 
+    # 7) KFS 公表裁決事例（裁決事例）
+    if cfg.get("kfs_saiketsu", {}).get("enabled", False):
+        kk = cfg["kfs_saiketsu"]
+        docs.extend(
+            collect_kfs_saiketsu(
+                start_url=kk.get("start_url", "https://www.kfs.go.jp/service/JP/index.html"),
+                delay_seconds=float(kk.get("delay_seconds", 1.2)),
+                max_cases=int(kk.get("max_cases", 0)),
+                include_youshi=bool(kk.get("include_youshi", False)),
+            )
+        )
 
     # ---- normalize docs ----
     normalized_docs: List[Dict] = []
     for d in docs:
+        source = d.get("source", "unknown")
+        url = (d.get("url") or "").strip()
+        title = (d.get("title") or url).strip()
+
+        if not url:
+            continue
+
         content = clean_text(d.get("content", ""))
         if not content or len(content) < 80:
             continue
-
-        source = d.get("source", "unknown")
-        url = d.get("url", "")
-        title = d.get("title") or url
 
         doc_id = sha1(f"{source}|{url}")
         content_hash = sha1(content)
@@ -108,7 +128,7 @@ def main():
                 "title": title,
                 "url": url,
                 "content_hash": content_hash,
-                "content": content,  # chunks化のために一時的に保持
+                "content": content,  # chunk化用に一時保持
             }
         )
 
@@ -129,17 +149,15 @@ def main():
 
     # ---- embedding ----
     emb_cfg = cfg.get("embedding", {}) or {}
-    model_name = emb_cfg.get(
-        "model", "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
-    )
+    model_name = emb_cfg.get("model", "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
     normalize = bool(emb_cfg.get("normalize", True))
-    outer_batch = int(emb_cfg.get("batch_size", 64))
+    batch = int(emb_cfg.get("batch_size", 64))
 
     embeddings: List[List[float]] = []
-    for i in tqdm(range(0, len(all_chunk_texts), outer_batch), desc="Embedding"):
+    for i in tqdm(range(0, len(all_chunk_texts), batch), desc="Embedding"):
         embeddings.extend(
             embed_texts(
-                all_chunk_texts[i : i + outer_batch],
+                all_chunk_texts[i : i + batch],
                 model_name=model_name,
                 normalize=normalize,
             )
