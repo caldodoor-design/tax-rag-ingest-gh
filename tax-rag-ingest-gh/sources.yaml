@@ -155,6 +155,13 @@ nta_kobetsu:
     - "/index\\.htm"
     - "/index2\\.htm"
 
+kfs_saiketsu:
+  enabled: true
+  start_url: https://www.kfs.go.jp/service/JP/index.html
+  delay_seconds: 1.2
+  max_cases: 0
+  include_youshi: false
+
 
 chunking:
   max_chars: 1200
