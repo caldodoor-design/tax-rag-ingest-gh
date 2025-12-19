@@ -81,6 +81,11 @@ def main():
     # 5) Tax Answer（タックスアンサー）
     if cfg.get("taxanswer", {}).get("enabled", False):
         docs.extend(_crawl_html_block(cfg["taxanswer"], kind="taxanswer"))
+        
+    # 6) NTA 個別通達（kobetsu）
+    if cfg.get("nta_kobetsu", {}).get("enabled", False):
+        docs.extend(_crawl_html_block(cfg["nta_kobetsu"], kind="kobetsu"))
+
 
     # ---- normalize docs ----
     normalized_docs: List[Dict] = []
