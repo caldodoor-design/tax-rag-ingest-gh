@@ -122,6 +122,38 @@ taxanswer:
     - "/index\\.htm"
     - "/index2\\.htm"
 
+nta_kobetsu:
+  enabled: true
+  max_pages: 50000
+  delay_seconds: 0.6
+
+  # 個別通達「目次」ページ（ここから全部辿る）
+  seeds:
+    - https://www.nta.go.jp/law/tsutatsu/kobetsu/hojin/houzin.htm          # 法人税関係 個別通達目次 :contentReference[oaicite:0]{index=0}
+    - https://www.nta.go.jp/law/tsutatsu/kobetsu/shotoku/shinkoku/sinkoku.htm # 申告所得税関係 個別通達目次 :contentReference[oaicite:1]{index=1}
+    - https://www.nta.go.jp/law/tsutatsu/kobetsu/shotoku/gensen/gensen.htm    # 源泉所得税関係 個別通達目次 :contentReference[oaicite:2]{index=2}
+    - https://www.nta.go.jp/law/tsutatsu/kobetsu/kansetsu/syouhi.htm      # 間接税関係 個別通達目次 :contentReference[oaicite:3]{index=3}
+    - https://www.nta.go.jp/law/tsutatsu/kobetsu/sozoku/souzoku.htm       # 相続税関係 個別通達目次 :contentReference[oaicite:4]{index=4}
+    - https://www.nta.go.jp/law/tsutatsu/kobetsu/hyoka/zaisan.htm         # 財産評価関係 個別通達目次 :contentReference[oaicite:5]{index=5}
+    - https://www.nta.go.jp/law/tsutatsu/kobetsu/zeimuchosa/zeimuchosa.htm # 税務調査手続関係 個別通達目次 :contentReference[oaicite:6]{index=6}
+    - https://www.nta.go.jp/law/tsutatsu/kobetsu/sonota/sonota.htm        # その他 個別通達目次 :contentReference[oaicite:7]{index=7}
+
+  allowed_prefixes:
+    - https://www.nta.go.jp/law/tsutatsu/kobetsu/
+
+  # PDFなどは今は除外（HTML本文だけ先にRAGへ）
+  exclude_url_regex:
+    - "/pdf/"
+    - "\\.pdf$"
+    - "\\.zip$"
+
+  # 目次/一覧はDB保存しない（でもリンクは辿る）
+  skip_save_title_regex:
+    - "目次"
+    - "一覧"
+  skip_save_url_regex:
+    - "/index\\.htm"
+    - "/index2\\.htm"
 
 
 chunking:
