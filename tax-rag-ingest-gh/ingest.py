@@ -1,8 +1,7 @@
 import os
 import yaml
-import hashlib
 import inspect
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 
 import psycopg2
 from tqdm import tqdm
@@ -10,72 +9,145 @@ from tqdm import tqdm
 from text_utils import chunk_text, clean_text
 from egov import collect_laws_by_keywords
 from nta import crawl_nta
-from kfs import collect_kfs_saiketsu
 from embed import embed_texts
-from upsert import upsert_documents_and_chunks
+from upsert import sha1, upsert_documents_and_chunks
 
-
-def sha1(s: str) -> str:
-    return hashlib.sha1(s.encode("utf-8")).hexdigest()
+# KFS（裁決事例）対応：kfs.py がある環境だけ有効になるように
+_CRAWL_KFS = None
+try:
+    from kfs import crawl_kfs as _CRAWL_KFS  # type: ignore
+except Exception:
+    try:
+        from kfs import collect_kfs as _CRAWL_KFS  # type: ignore
+    except Exception:
+        try:
+            from kfs import crawl_kfs_decisions as _CRAWL_KFS  # type: ignore
+        except Exception:
+            _CRAWL_KFS = None
 
 
 def load_config(path: str) -> Dict:
     with open(path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f) or {}
+        data = yaml.safe_load(f)
+    return data or {}
 
 
-def _call_collect_laws_by_keywords(cfg_egov: Dict) -> List[Dict]:
+def call_collect_laws_by_keywords(eg_cfg: Dict) -> List[Dict]:
+    """egov.collect_laws_by_keywords の引数揺れに耐える呼び出し"""
     sig = inspect.signature(collect_laws_by_keywords)
     kwargs = {}
 
     if "keywords" in sig.parameters:
-        kwargs["keywords"] = cfg_egov.get("keywords", [])
+        kwargs["keywords"] = eg_cfg.get("keywords", [])
 
     if "max_laws" in sig.parameters:
-        kwargs["max_laws"] = int(cfg_egov.get("max_laws", 500))
+        kwargs["max_laws"] = int(eg_cfg.get("max_laws", 500))
 
-    if "category" in sig.parameters and cfg_egov.get("category") is not None:
-        kwargs["category"] = int(cfg_egov.get("category"))
+    if "category" in sig.parameters and eg_cfg.get("category") is not None:
+        kwargs["category"] = int(eg_cfg.get("category", 1))
 
-    for key in ["exact_allow", "prefix_allow", "include_suffixes", "exclude_phrases"]:
-        if key in sig.parameters and cfg_egov.get(key) is not None:
-            kwargs[key] = cfg_egov.get(key)
+    # フィルタ系（存在するものだけ渡す）
+    for k in ["exact_allow", "prefix_allow", "include_suffixes", "exclude_phrases"]:
+        if k in sig.parameters and eg_cfg.get(k) is not None:
+            kwargs[k] = eg_cfg.get(k)
 
     return collect_laws_by_keywords(**kwargs)
 
 
-def _crawl_html_block(cfg_block: Dict, kind: str) -> List[Dict]:
-    return crawl_nta(
-        seeds=cfg_block.get("seeds", []),
-        max_pages=int(cfg_block.get("max_pages", 1000)),
-        delay_seconds=float(cfg_block.get("delay_seconds", 0.6)),
-        allowed_prefixes=cfg_block.get("allowed_prefixes"),
-        exclude_url_regex=cfg_block.get("exclude_url_regex"),
-        extra_defaults={"nta_kind": kind},
-        skip_save_title_regex=cfg_block.get("skip_save_title_regex"),
-        skip_save_url_regex=cfg_block.get("skip_save_url_regex"),
-    )
+def call_crawl_nta(block_cfg: Dict, kind: str) -> List[Dict]:
+    """nta.crawl_nta の引数揺れに耐える呼び出し（目次は保存しない等も対応）"""
+    sig = inspect.signature(crawl_nta)
+    kwargs = {}
+
+    # 必須級
+    if "seeds" in sig.parameters:
+        kwargs["seeds"] = block_cfg.get("seeds", [])
+    if "max_pages" in sig.parameters:
+        kwargs["max_pages"] = int(block_cfg.get("max_pages", 1000))
+    if "delay_seconds" in sig.parameters:
+        kwargs["delay_seconds"] = float(block_cfg.get("delay_seconds", 0.6))
+
+    # 任意
+    if "allowed_prefixes" in sig.parameters:
+        kwargs["allowed_prefixes"] = block_cfg.get("allowed_prefixes")
+    if "exclude_url_regex" in sig.parameters:
+        kwargs["exclude_url_regex"] = block_cfg.get("exclude_url_regex")
+
+    # 追加メタ（対応してる版だけ）
+    if "extra_defaults" in sig.parameters:
+        kwargs["extra_defaults"] = {"nta_kind": kind}
+
+    # 「目次/一覧は保存しない」（対応してる版だけ）
+    if "skip_save_title_regex" in sig.parameters:
+        kwargs["skip_save_title_regex"] = block_cfg.get("skip_save_title_regex")
+    if "skip_save_url_regex" in sig.parameters:
+        kwargs["skip_save_url_regex"] = block_cfg.get("skip_save_url_regex")
+
+    return crawl_nta(**kwargs)
 
 
-def _fetch_existing_hashes(db_url: str, doc_ids: List[str]) -> Dict[str, str]:
-    """documents から既存の content_hash をまとめて取ってくる"""
-    if not doc_ids:
+def call_crawl_kfs(block_cfg: Dict) -> List[Dict]:
+    """kfs 側の関数名/引数揺れに耐える呼び出し"""
+    if _CRAWL_KFS is None:
+        raise RuntimeError("kfs.py が見つからない or crawl関数が import できません")
+
+    sig = inspect.signature(_CRAWL_KFS)
+    kwargs = {}
+
+    # よくある引数だけ、存在するものを渡す
+    for k in ["seeds", "start_urls"]:
+        if k in sig.parameters:
+            kwargs[k] = block_cfg.get("seeds", block_cfg.get("start_urls", []))
+
+    for k in ["max_pages", "limit"]:
+        if k in sig.parameters:
+            kwargs[k] = int(block_cfg.get("max_pages", block_cfg.get("limit", 5000)))
+
+    for k in ["delay_seconds", "delay"]:
+        if k in sig.parameters:
+            kwargs[k] = float(block_cfg.get("delay_seconds", block_cfg.get("delay", 0.6)))
+
+    for k in ["allowed_prefixes", "exclude_url_regex", "skip_save_title_regex", "skip_save_url_regex"]:
+        if k in sig.parameters:
+            kwargs[k] = block_cfg.get(k)
+
+    return _CRAWL_KFS(**kwargs)
+
+
+def fetch_existing_hashes(conn, sources: List[str]) -> Dict[Tuple[str, str], str]:
+    """DBに既にある (source,url)->content_hash を取る"""
+    if not sources:
         return {}
-    conn = psycopg2.connect(db_url)
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "select id, content_hash from public.documents where id = any(%s)",
-                (doc_ids,),
-            )
-            return {row[0]: (row[1] or "") for row in cur.fetchall()}
-    finally:
-        conn.close()
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            select source, url, content_hash
+            from public.documents
+            where source = any(%s)
+            """,
+            (sources,),
+        )
+        rows = cur.fetchall()
+    return {(s, u): h for (s, u, h) in rows}
+
+
+def delete_chunks_for_docs(conn, doc_ids: List[str]) -> None:
+    """変更のあったdocの古いchunksを先に全削除（chunk数が減るときのゴミ防止）"""
+    if not doc_ids:
+        return
+    with conn.cursor() as cur:
+        cur.execute(
+            "delete from public.chunks where doc_id = any(%s)",
+            (doc_ids,),
+        )
 
 
 def main():
-    cfg = load_config("sources.yaml")
+    # config
+    cfg_path = os.environ.get("SOURCES_YAML", "sources.yaml")
+    cfg = load_config(cfg_path)
 
+    # DB URL（差分判定にも使うので先に必須化）
     db_url = os.environ.get("SUPABASE_DB_URL")
     if not db_url:
         raise RuntimeError("Missing SUPABASE_DB_URL environment variable")
@@ -84,48 +156,38 @@ def main():
 
     # 1) e-Gov
     if cfg.get("egov", {}).get("enabled", False):
-        docs.extend(_call_collect_laws_by_keywords(cfg["egov"]))
+        docs.extend(call_collect_laws_by_keywords(cfg["egov"]))
 
-    # 2) NTA 基本通達
+    # 2) NTA: 基本通達
     if cfg.get("nta", {}).get("enabled", False):
-        docs.extend(_crawl_html_block(cfg["nta"], kind="kihon"))
+        docs.extend(call_crawl_nta(cfg["nta"], kind="kihon"))
 
-    # 3) NTA 措置法通達
+    # 3) NTA: 措置法通達（任意）
     if cfg.get("nta_sochiho", {}).get("enabled", False):
-        docs.extend(_crawl_html_block(cfg["nta_sochiho"], kind="sochiho"))
+        docs.extend(call_crawl_nta(cfg["nta_sochiho"], kind="sochiho"))
 
-    # 4) NTA 質疑応答事例
+    # 4) NTA: 質疑応答事例（任意）
     if cfg.get("nta_shitsugi", {}).get("enabled", False):
-        docs.extend(_crawl_html_block(cfg["nta_shitsugi"], kind="shitsugi"))
+        docs.extend(call_crawl_nta(cfg["nta_shitsugi"], kind="shitsugi"))
 
-    # 5) Tax Answer
+    # 5) NTA: タックスアンサー（任意）
     if cfg.get("taxanswer", {}).get("enabled", False):
-        docs.extend(_crawl_html_block(cfg["taxanswer"], kind="taxanswer"))
+        docs.extend(call_crawl_nta(cfg["taxanswer"], kind="taxanswer"))
 
-    # 6) NTA 個別通達
+    # 6) NTA: 個別通達（任意）
     if cfg.get("nta_kobetsu", {}).get("enabled", False):
-        docs.extend(_crawl_html_block(cfg["nta_kobetsu"], kind="kobetsu"))
+        docs.extend(call_crawl_nta(cfg["nta_kobetsu"], kind="kobetsu"))
 
-    # 7) KFS 裁決事例
-    if cfg.get("kfs_saiketsu", {}).get("enabled", False):
-        kk = cfg["kfs_saiketsu"]
-        docs.extend(
-            collect_kfs_saiketsu(
-                start_url=kk.get("start_url", "https://www.kfs.go.jp/service/JP/index.html"),
-                delay_seconds=float(kk.get("delay_seconds", 1.2)),
-                max_cases=int(kk.get("max_cases", 0)),
-                include_youshi=bool(kk.get("include_youshi", False)),
-            )
-        )
+    # 7) KFS: 裁決事例（任意）
+    if cfg.get("kfs", {}).get("enabled", False):
+        docs.extend(call_crawl_kfs(cfg["kfs"]))
 
-    # ---- normalize + dedupe by doc_id ----
-    by_id: Dict[str, Dict] = {}
+    # ---- normalize ----
+    normalized: List[Dict] = []
     for d in docs:
         source = d.get("source", "unknown")
-        url = (d.get("url") or "").strip()
-        title = (d.get("title") or url).strip()
-        if not url:
-            continue
+        url = d.get("url", "")
+        title = d.get("title") or url
 
         content = clean_text(d.get("content", ""))
         if not content or len(content) < 80:
@@ -134,34 +196,49 @@ def main():
         doc_id = sha1(f"{source}|{url}")
         content_hash = sha1(content)
 
-        by_id[doc_id] = {
-            "id": doc_id,
-            "source": source,
-            "title": title,
-            "url": url,
-            "content_hash": content_hash,
-            "content": content,
-        }
+        normalized.append(
+            {
+                "id": doc_id,
+                "source": source,
+                "title": title,
+                "url": url,
+                "content_hash": content_hash,
+                "content": content,  # chunk用に一時保持
+            }
+        )
 
-    normalized_docs = list(by_id.values())
+    # ---- diff mode（差分だけ）----
+    diff_cfg = cfg.get("diff", {}) or {}
+    diff_enabled = bool(diff_cfg.get("enabled", True))
 
-    # ---- diff: unchanged docs are skipped (no chunking/embedding/upsert) ----
-    existing = _fetch_existing_hashes(db_url, [d["id"] for d in normalized_docs])
-    changed_docs = [d for d in normalized_docs if existing.get(d["id"], "") != d["content_hash"]]
+    total_fetched = len(normalized)
+    changed_docs = normalized
 
-    print(f"Docs total: {len(normalized_docs)} / Changed: {len(changed_docs)}")
+    if diff_enabled and total_fetched > 0:
+        sources = sorted(list({d["source"] for d in normalized}))
+        conn = psycopg2.connect(db_url)
+        try:
+            existing = fetch_existing_hashes(conn, sources)
+            changed_docs = [
+                d for d in normalized
+                if existing.get((d["source"], d["url"])) != d["content_hash"]
+            ]
+        finally:
+            conn.close()
 
-    if not changed_docs:
-        print("No changes detected. Done.")
+    print(f"Docs total: {total_fetched} / Changed: {len(changed_docs)}")
+
+    if len(changed_docs) == 0:
+        print("No changes. Done.")
         return
 
-    # ---- chunking (only changed) ----
+    # ---- chunking ----
     ch_cfg = cfg.get("chunking", {}) or {}
     max_chars = int(ch_cfg.get("max_chars", 1200))
     overlap = int(ch_cfg.get("overlap_chars", 200))
 
     all_chunk_texts: List[str] = []
-    all_chunk_refs: List[Tuple[str, int, str, str]] = []  # (doc_id, idx, text, hash)
+    all_chunk_refs: List[Tuple[str, int, str, str]] = []  # (doc_id, idx, content, hash)
 
     for d in changed_docs:
         chunks = chunk_text(d["content"], max_chars=max_chars, overlap_chars=overlap)
@@ -170,7 +247,7 @@ def main():
             all_chunk_texts.append(c)
             all_chunk_refs.append((d["id"], i, c, h))
 
-    # ---- embedding (only changed chunks) ----
+    # ---- embedding ----
     emb_cfg = cfg.get("embedding", {}) or {}
     model_name = emb_cfg.get("model", "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
     normalize = bool(emb_cfg.get("normalize", True))
@@ -189,9 +266,27 @@ def main():
     chunks_by_doc: Dict[str, List[Dict]] = {}
     for (doc_id, idx, c, h), emb in zip(all_chunk_refs, embeddings):
         chunks_by_doc.setdefault(doc_id, []).append(
-            {"chunk_index": idx, "content": c, "content_hash": h, "embedding": emb}
+            {
+                "chunk_index": idx,
+                "content": c,
+                "content_hash": h,
+                "embedding": emb,
+            }
         )
 
+    # ---- delete old chunks for changed docs (important) ----
+    conn = psycopg2.connect(db_url)
+    conn.autocommit = False
+    try:
+        delete_chunks_for_docs(conn, [d["id"] for d in changed_docs])
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+    # ---- upsert ----
     docs_meta = [
         {
             "id": d["id"],
