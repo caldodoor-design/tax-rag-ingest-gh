@@ -85,7 +85,23 @@ def upsert_documents_and_chunks(db_url: str, docs: List[Dict], chunks_by_doc: Di
                     template="(%s, %s, %s, %s, %s::vector)",
                     page_size=500,
                 )
+def fetch_existing_docs(conn, source: str):
+    """
+    既存の documents を {url: content_hash} で返す
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            select url, content_hash
+            from public.documents
+            where source = %s
+            """,
+            (source,),
+        )
+        rows = cur.fetchall()
+    return {url: h for (url, h) in rows}
 
+        
         conn.commit()
     except Exception:
         conn.rollback()
