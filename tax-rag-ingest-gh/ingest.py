@@ -2,14 +2,14 @@ import os
 import yaml
 import inspect
 from typing import Dict, List, Tuple
-
 from tqdm import tqdm
-
 from text_utils import chunk_text, clean_text
 from egov import collect_laws_by_keywords
 from nta import crawl_nta
+from kfs import collect_kfs_saiketsu
 from embed import embed_texts
 from upsert import sha1, upsert_documents_and_chunks
+
 
 
 def load_config(path: str) -> Dict:
