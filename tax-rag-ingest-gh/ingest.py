@@ -4,6 +4,7 @@ import hashlib
 import inspect
 from typing import Dict, List, Tuple
 
+import psycopg2
 from tqdm import tqdm
 
 from text_utils import chunk_text, clean_text
@@ -24,10 +25,6 @@ def load_config(path: str) -> Dict:
 
 
 def _call_collect_laws_by_keywords(cfg_egov: Dict) -> List[Dict]:
-    """
-    egov.collect_laws_by_keywords の引数が版で揺れても落ちないように
-    signatureを見て渡せるものだけ渡す。
-    """
     sig = inspect.signature(collect_laws_by_keywords)
     kwargs = {}
 
@@ -48,10 +45,6 @@ def _call_collect_laws_by_keywords(cfg_egov: Dict) -> List[Dict]:
 
 
 def _crawl_html_block(cfg_block: Dict, kind: str) -> List[Dict]:
-    """
-    www.nta.go.jp の静的HTMLを crawl_nta でクロールする共通ブロック
-    (基本通達 / 措置法通達 / 質疑応答 / TaxAnswer / 個別通達など)
-    """
     return crawl_nta(
         seeds=cfg_block.get("seeds", []),
         max_pages=int(cfg_block.get("max_pages", 1000)),
@@ -64,8 +57,29 @@ def _crawl_html_block(cfg_block: Dict, kind: str) -> List[Dict]:
     )
 
 
+def _fetch_existing_hashes(db_url: str, doc_ids: List[str]) -> Dict[str, str]:
+    """documents から既存の content_hash をまとめて取ってくる"""
+    if not doc_ids:
+        return {}
+    conn = psycopg2.connect(db_url)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "select id, content_hash from public.documents where id = any(%s)",
+                (doc_ids,),
+            )
+            return {row[0]: (row[1] or "") for row in cur.fetchall()}
+    finally:
+        conn.close()
+
+
 def main():
     cfg = load_config("sources.yaml")
+
+    db_url = os.environ.get("SUPABASE_DB_URL")
+    if not db_url:
+        raise RuntimeError("Missing SUPABASE_DB_URL environment variable")
+
     docs: List[Dict] = []
 
     # 1) e-Gov
@@ -84,7 +98,7 @@ def main():
     if cfg.get("nta_shitsugi", {}).get("enabled", False):
         docs.extend(_crawl_html_block(cfg["nta_shitsugi"], kind="shitsugi"))
 
-    # 5) Tax Answer（タックスアンサー）
+    # 5) Tax Answer
     if cfg.get("taxanswer", {}).get("enabled", False):
         docs.extend(_crawl_html_block(cfg["taxanswer"], kind="taxanswer"))
 
@@ -92,7 +106,7 @@ def main():
     if cfg.get("nta_kobetsu", {}).get("enabled", False):
         docs.extend(_crawl_html_block(cfg["nta_kobetsu"], kind="kobetsu"))
 
-    # 7) KFS 公表裁決事例（裁決事例）
+    # 7) KFS 裁決事例
     if cfg.get("kfs_saiketsu", {}).get("enabled", False):
         kk = cfg["kfs_saiketsu"]
         docs.extend(
@@ -104,13 +118,12 @@ def main():
             )
         )
 
-    # ---- normalize docs ----
-    normalized_docs: List[Dict] = []
+    # ---- normalize + dedupe by doc_id ----
+    by_id: Dict[str, Dict] = {}
     for d in docs:
         source = d.get("source", "unknown")
         url = (d.get("url") or "").strip()
         title = (d.get("title") or url).strip()
-
         if not url:
             continue
 
@@ -121,18 +134,28 @@ def main():
         doc_id = sha1(f"{source}|{url}")
         content_hash = sha1(content)
 
-        normalized_docs.append(
-            {
-                "id": doc_id,
-                "source": source,
-                "title": title,
-                "url": url,
-                "content_hash": content_hash,
-                "content": content,  # chunk化用に一時保持
-            }
-        )
+        by_id[doc_id] = {
+            "id": doc_id,
+            "source": source,
+            "title": title,
+            "url": url,
+            "content_hash": content_hash,
+            "content": content,
+        }
 
-    # ---- chunking ----
+    normalized_docs = list(by_id.values())
+
+    # ---- diff: unchanged docs are skipped (no chunking/embedding/upsert) ----
+    existing = _fetch_existing_hashes(db_url, [d["id"] for d in normalized_docs])
+    changed_docs = [d for d in normalized_docs if existing.get(d["id"], "") != d["content_hash"]]
+
+    print(f"Docs total: {len(normalized_docs)} / Changed: {len(changed_docs)}")
+
+    if not changed_docs:
+        print("No changes detected. Done.")
+        return
+
+    # ---- chunking (only changed) ----
     ch_cfg = cfg.get("chunking", {}) or {}
     max_chars = int(ch_cfg.get("max_chars", 1200))
     overlap = int(ch_cfg.get("overlap_chars", 200))
@@ -140,14 +163,14 @@ def main():
     all_chunk_texts: List[str] = []
     all_chunk_refs: List[Tuple[str, int, str, str]] = []  # (doc_id, idx, text, hash)
 
-    for d in normalized_docs:
+    for d in changed_docs:
         chunks = chunk_text(d["content"], max_chars=max_chars, overlap_chars=overlap)
         for i, c in enumerate(chunks):
             h = sha1(c)
             all_chunk_texts.append(c)
             all_chunk_refs.append((d["id"], i, c, h))
 
-    # ---- embedding ----
+    # ---- embedding (only changed chunks) ----
     emb_cfg = cfg.get("embedding", {}) or {}
     model_name = emb_cfg.get("model", "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
     normalize = bool(emb_cfg.get("normalize", True))
@@ -166,18 +189,8 @@ def main():
     chunks_by_doc: Dict[str, List[Dict]] = {}
     for (doc_id, idx, c, h), emb in zip(all_chunk_refs, embeddings):
         chunks_by_doc.setdefault(doc_id, []).append(
-            {
-                "chunk_index": idx,
-                "content": c,
-                "content_hash": h,
-                "embedding": emb,
-            }
+            {"chunk_index": idx, "content": c, "content_hash": h, "embedding": emb}
         )
-
-    # ---- upsert ----
-    db_url = os.environ.get("SUPABASE_DB_URL")
-    if not db_url:
-        raise RuntimeError("Missing SUPABASE_DB_URL environment variable")
 
     docs_meta = [
         {
@@ -187,10 +200,10 @@ def main():
             "url": d["url"],
             "content_hash": d["content_hash"],
         }
-        for d in normalized_docs
+        for d in changed_docs
     ]
 
-    print(f"Docs: {len(docs_meta)} / Chunks: {len(all_chunk_refs)}")
+    print(f"Upserting Docs: {len(docs_meta)} / Chunks: {len(all_chunk_refs)}")
     upsert_documents_and_chunks(db_url=db_url, docs=docs_meta, chunks_by_doc=chunks_by_doc)
     print("Done.")
 
