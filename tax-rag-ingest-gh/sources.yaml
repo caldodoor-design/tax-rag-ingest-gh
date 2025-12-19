@@ -106,10 +106,11 @@ nta_shitsugi:
 
 taxanswer:
   enabled: true
-  max_pages: 6000
+  max_pages: 20000
   delay_seconds: 0.6
   seeds:
-    - https://www.nta.go.jp/taxes/shiraberu/taxanswer/
+    - https://www.nta.go.jp/taxes/shiraberu/taxanswer/index2.htm
+    - https://www.nta.go.jp/taxes/shiraberu/taxanswer/code/index.htm
   allowed_prefixes:
     - https://www.nta.go.jp/taxes/shiraberu/taxanswer/
   exclude_url_regex:
@@ -119,6 +120,8 @@ taxanswer:
     - "一覧"
   skip_save_url_regex:
     - "/index\\.htm"
+    - "/index2\\.htm"
+
 
 
 chunking:
