@@ -168,5 +168,7 @@ chunking:
   overlap_chars: 200
 
 embedding:
-  model: sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
+  model: intfloat/multilingual-e5-small
   normalize: true
+  batch_size: 64
+
