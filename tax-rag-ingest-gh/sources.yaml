@@ -172,3 +172,5 @@ embedding:
   normalize: true
   batch_size: 64
 
+diff:
+  enabled: false
