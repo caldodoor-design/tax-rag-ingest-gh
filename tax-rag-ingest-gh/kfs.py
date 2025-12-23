@@ -106,11 +106,17 @@ def _get_soup(url: str, timeout: int = 25) -> Optional[BeautifulSoup]:
     try:
         res = requests.get(url, headers=HEADERS, timeout=timeout)
         res.raise_for_status()
-        res.encoding = res.apparent_encoding or "utf-8"
-        return BeautifulSoup(res.text, "html.parser")
+
+        raw = res.content  # ←ここ重要（bytes）
+        ct = res.headers.get("Content-Type", "")
+
+        html = _decode_html_bytes(raw, header_content_type=ct, fallback="cp932")
+        return BeautifulSoup(html, "html.parser")
+
     except Exception as e:
         print(f"[KFS] fetch failed: {url} / {e}")
         return None
+
 
 
 def _clean_text(area: BeautifulSoup) -> str:
