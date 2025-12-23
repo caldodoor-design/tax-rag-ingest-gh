@@ -15,6 +15,68 @@ HEADERS = {
     )
 }
 
+def _normalize_encoding(enc: Optional[str]) -> Optional[str]:
+    if not enc:
+        return None
+    e = enc.strip().lower().replace("_", "").replace("-", "")
+    if e in ("shiftjis", "sjis", "windows31j", "cp932"):
+        return "cp932"  # 実務的にこれが一番事故りにくい
+    if e in ("eucjp", "euc-jp"):
+        return "euc-jp"
+    if e in ("utf8", "utf-8"):
+        return "utf-8"
+    return enc.strip()
+
+
+def _sniff_charset_from_html_head(raw: bytes) -> Optional[str]:
+    # HTMLの先頭数KBにある meta charset はASCIIで書かれてるので、バイト列に対して検索できる
+    head = raw[:4096]
+
+    m = re.search(br"<meta[^>]*charset=['\"]?\s*([a-zA-Z0-9_\-]+)\s*['\"]?", head, re.I)
+    if m:
+        try:
+            return _normalize_encoding(m.group(1).decode("ascii", errors="ignore"))
+        except Exception:
+            pass
+
+    m = re.search(br"charset\s*=\s*([a-zA-Z0-9_\-]+)", head, re.I)
+    if m:
+        try:
+            return _normalize_encoding(m.group(1).decode("ascii", errors="ignore"))
+        except Exception:
+            pass
+
+    return None
+
+
+def _decode_html_bytes(raw: bytes, header_content_type: str, fallback: str = "cp932") -> str:
+    # 1) HTTPヘッダの charset
+    header_enc = None
+    if header_content_type:
+        m = re.search(r"charset\s*=\s*([^;]+)", header_content_type, re.I)
+        if m:
+            header_enc = _normalize_encoding(m.group(1))
+
+    # 2) HTML meta charset
+    meta_enc = _sniff_charset_from_html_head(raw)
+
+    # 3) 候補の優先順（KFSはcp932が多い想定でフォールバック）
+    candidates = []
+    for e in (meta_enc, header_enc, fallback, "euc-jp", "utf-8"):
+        if e and e not in candidates:
+            candidates.append(e)
+
+    # 4) デコード試行
+    for enc in candidates:
+        try:
+            return raw.decode(enc)
+        except UnicodeDecodeError:
+            continue
+
+    # 最後は壊れてもいいから可視化（置換）
+    return raw.decode(candidates[0] if candidates else "utf-8", errors="replace")
+
+
 # --- Heuristics (ここがキモ) ---
 # これ未満のページは「ホーム/索引/目次」っぽいので捨てる
 MIN_CONTENT_CHARS_DEFAULT = 2000
